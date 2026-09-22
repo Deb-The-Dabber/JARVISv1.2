@@ -1,0 +1,361 @@
+# JARVIS V5 — State Foundation: Implementation Contract v1.0
+
+Purpose: remove every remaining ambiguity between "the Constitution says X" and "the code does X."
+Everything below is either a schema, a function signature with explicit pre/postconditions, or a
+literal test case. No prose architecture — that phase is over. Every rule cites the Law number it
+implements so a reviewer can trace code back to Constitution back to the original counterexample.
+
+Language-agnostic on purpose (types are illustrative), but shaped for a single-process Python
+implementation with SQLite as the obvious default persistence layer, per the "single-process-
+first" decision.
+
+---
+
+## 1. Identifiers
+
+```
+type Id = str  # ULID, prefixed per type: goal_/task_/plan_/step_/act_/obs_/ev_/clm_/ver_/obl_
+```
+
+All IDs generated at creation, never reused (Law 34 corollary), never derived by truncation.
+
+---
+
+## 2. Enums
+
+```python
+class GoalStatus(Enum):
+    ACTIVE, PAUSED, BLOCKED, COMPLETED, CANCELLED, ARCHIVED
+
+class TaskStatus(Enum):
+    PENDING, ACTIVE, BLOCKED, PAUSED, COMPLETED, FAILED, CANCELLED, ARCHIVED
+
+class PlanStatus(Enum):
+    DRAFT, BLOCKED, COMPLETED, FAILED, CANCELLED, SUPERSEDED, ARCHIVED
+    # NOTE: no ACTIVE value here — see Law 6 / §4 below. "Active" is derived, never stored.
+
+class StepStatus(Enum):
+    PENDING, READY, EXECUTING, BLOCKED, COMPLETED, FAILED, CANCELLED, SKIPPED
+
+class ActionStatus(Enum):
+    PENDING, EXECUTING, OBSERVED, UNKNOWN_OUTCOME, FAILED, CANCELLED
+
+class VerificationResult(Enum):
+    PENDING, RUNNING, PASS, FAIL, INCONCLUSIVE
+
+class EvidenceStatus(Enum):
+    CONFIRMED_SOURCE, CONFIRMED_RUNTIME, INFERENCE, UNKNOWN
+
+class ClaimConfidence(Enum):
+    HIGH, MEDIUM, LOW, UNVERIFIED
+
+class ObligationDisposition(Enum):
+    OPEN, RESOLVED, ABANDONED
+    # NOTE: no TRANSFERRED value — transfer is an ownership change + history event, not a
+    # disposition state (Law 18/19). An obligation owned by the UOR is still OPEN.
+
+class IdempotencyClass(Enum):
+    IDEMPOTENT, CONDITIONALLY_IDEMPOTENT, NON_IDEMPOTENT, UNKNOWN
+
+class IntegrityStatus(Enum):
+    OK, FROZEN, ABANDONED_UNREPAIRABLE
+```
+
+---
+
+## 3. Core schemas (fields only — persistence layer TBD, deliberately)
+
+```python
+@dataclass
+class Goal:
+    id: Id
+    revision: int                      # optimistic concurrency token, Law 3
+    status: GoalStatus
+    completion_policy: CompletionPolicy  # see §5 — mandatory, no default that means "anything"
+    created_at: datetime
+    session_origin: Id | None          # navigational only, Law: Session ≠ Work
+    integrity: IntegrityStatus = IntegrityStatus.OK
+
+@dataclass
+class Task:
+    id: Id
+    revision: int
+    goal_id: Id
+    status: TaskStatus
+    active_plan_id: Id | None          # THE canonical ownership field, Law 15/35
+    completion_policy: CompletionPolicy
+    retry_budget: RetryBudget          # Step/Action-boundary counters live here, Law: retry §3
+    integrity: IntegrityStatus = IntegrityStatus.OK
+
+@dataclass
+class Plan:
+    id: Id
+    revision: int
+    task_id: Id
+    status: PlanStatus                 # never ACTIVE — see §4
+    superseded_by: Id | None
+    dependency_graph: dict[Id, set[Id]]  # step_id -> depends_on step_ids; must stay acyclic (Law 13)
+
+@dataclass
+class Step:
+    id: Id
+    revision: int
+    plan_id: Id
+    status: StepStatus
+    required: bool                     # Law: "requiredness is Work's, not the planner's, to set"
+    depends_on: set[Id]                # step ids, validated acyclic at write time (Law 13)
+
+@dataclass
+class Action:
+    id: Id
+    revision: int
+    step_id: Id
+    status: ActionStatus
+    capability: str
+    arguments: dict
+    idempotency_class: IdempotencyClass  # capability-declared, not inferred (Law 11)
+    confirmation_id: Id | None          # bound per Law 32
+
+@dataclass
+class Observation:
+    id: Id
+    action_id: Id
+    captured_at: datetime
+    raw_result: Any
+    execution_source: str               # which capability executor produced this
+
+@dataclass
+class Evidence:
+    id: Id
+    status: EvidenceStatus
+    acquisition_method: str             # orthogonal to status, Law 23
+    source: str
+    relevance_to: Id                    # what Claim/Task this bears on — a reference, not a float
+    timestamp: datetime
+    content: Any                        # immutable once written, Law 24
+
+@dataclass
+class Claim:
+    id: Id
+    asserts: str
+    based_on: list[Id]                  # Evidence ids
+    confidence: ClaimConfidence         # justified per relevant evidence, Law 27 — never derived by min()
+    made_by: str
+    version: int                        # Claim versioning — substantive change = new version, not edit
+
+@dataclass
+class Verification:
+    id: Id
+    verifies: Id                        # Claim id
+    method: str
+    independence_level: str             # deterministic | direct_observation | independent_capability
+                                         # | derived_computation | llm_evaluation | self_report
+    result: VerificationResult
+    timestamp: datetime
+
+@dataclass
+class Obligation:
+    id: Id
+    origin_action_id: Id
+    owner: Id                           # Task id OR the literal sentinel "UOR" — single owner, Law 18
+    disposition: ObligationDisposition
+    resolution_budget: int              # bounded, Law: unknown ≠ infinite paralysis
+    unknown_reason: str
+    possible_external_effect: str
+    safe_retry_conditions: str | None
+    history: list[ObligationEvent]      # transfer/dispose events — append-only
+
+@dataclass
+class ObligationEvent:
+    kind: str                           # "transferred" | "resolved" | "abandoned"
+    from_owner: Id
+    to_owner: Id | None
+    authorized_by: str | None           # human identity for ABANDON (Law 21)
+    reason: str
+    timestamp: datetime
+```
+
+---
+
+## 4. The Plan Exclusivity mechanism (Law 6 + 15 + 35, concretely)
+
+```python
+def plan_is_active(plan: Plan, task: Task) -> bool:
+    """Derived, never stored. This function IS the definition of 'active plan' —
+    there is no Plan.status == ACTIVE to check."""
+    return task.active_plan_id == plan.id and plan.status not in (
+        PlanStatus.CANCELLED, PlanStatus.SUPERSEDED, PlanStatus.ARCHIVED
+    )
+
+def activate_plan(task_id: Id, plan_id: Id, expected_task_revision: int) -> Result:
+    """
+    SINGLE atomic operation. This is the only legal way to make a Plan the active one.
+    Precondition (checked in the SAME transaction, not sequential reads):
+        - Task.revision == expected_task_revision
+        - Task.status in {ACTIVE, BLOCKED}          <- closes the cancellation/completion race
+        - Task.active_plan_id is None OR points to a plan already SUPERSEDED/CANCELLED/FAILED
+        - Plan.status == DRAFT
+    Postcondition:
+        - Task.active_plan_id = plan_id
+        - Task.revision += 1
+    Failure:
+        - Any precondition false -> reject atomically, return current authoritative Task state
+          to the caller (Law 4). No partial write.
+    """
+```
+
+---
+
+## 5. Completion policy (kept separate from obligation-closure per the v0.3 decision)
+
+```python
+@dataclass
+class CompletionPolicy:
+    rule: Literal["ALL_REQUIRED", "ANY_REQUIRED", "N_OF_M", "CRITERION"]
+    n: int | None                       # only for N_OF_M
+    criterion_ref: str | None           # only for CRITERION — a named, testable evaluator
+
+def evaluate_completion(obj: Task | Goal, children_status: list[TaskStatus | StepStatus]) -> bool:
+    """Pure function over the declared policy. Does NOT touch obligations —
+    see complete_object() below for how the two interact."""
+
+def complete_object(obj_id: Id, expected_revision: int) -> Result:
+    """
+    Precondition:
+        - completion policy is satisfied (evaluate_completion == True)
+        - every Verification required by the completion criterion has result == PASS
+          (not merely present — Law 16)
+    Postcondition, SAME atomic operation:
+        - obj.status = COMPLETED
+        - obj.revision += 1
+        - for every Obligation in obj's subtree where disposition == OPEN:
+              transfer_obligation(obligation.id, new_owner="UOR")   # Law 20, no exceptions
+    """
+```
+
+Note the ordering: obligation transfer is not a separate follow-up step or a background job. It is
+part of the same atomic write as the terminal transition. If your implementation needs two SQL
+statements, they go in one transaction.
+
+---
+
+## 6. Obligation transfer (Law 18/19/20)
+
+```python
+def transfer_obligation(obligation_id: Id, new_owner: Id | Literal["UOR"],
+                         expected_owner: Id) -> Result:
+    """
+    Precondition (checked atomically):
+        - Obligation.owner == expected_owner   <- prevents double-transfer (the A2/A3 race)
+        - Obligation.disposition == OPEN
+    Postcondition:
+        - Obligation.owner = new_owner
+        - Obligation.disposition remains OPEN   <- transfer is not resolution, Law 19
+        - append ObligationEvent(kind="transferred", ...)
+    """
+
+def abandon_obligation(obligation_id: Id, authorized_by: str, reason: str,
+                        expected_revision: int) -> Result:
+    """
+    Precondition:
+        - explicit human authorization naming THIS obligation specifically (Law 21)
+        - no blanket/bulk abandon of unenumerated obligations
+    Postcondition:
+        - disposition = ABANDONED
+        - append ObligationEvent(kind="abandoned", authorized_by=authorized_by, reason=reason)
+    """
+```
+
+---
+
+## 7. Repair (Law 29/30 — the one sanctioned exception)
+
+```python
+def repair_object(obj_id: Id, expected_revision: int, target_state: dict,
+                   authorized_by: str, reason: str) -> Result:
+    """
+    Callable ONLY through a distinct, restricted entry point — never reachable from cognition,
+    capability execution, automation, or background workers (enforced at the interface layer,
+    not just by convention).
+
+    Precondition, validated and committed in ONE atomic boundary (Law: no validate-then-commit gap):
+        1. obj.revision == expected_revision           (repair is revision-checked like anything else)
+        2. target_state does not set any field whose legality presumes a real Observation/Evidence
+           record unless one exists in the store (Law 29 — e.g. rejects Action.status=OBSERVED
+           with no backing Observation row; valid target in that case is UNKNOWN_OUTCOME)
+        3. target_state, once applied, satisfies every invariant owned by the affected aggregate,
+           not just obj's own local fields (Law: aggregate repair — re-run activate_plan-style
+           cross-object checks against the proposed result before committing)
+    Postcondition:
+        - obj updated to target_state
+        - obj.revision = new value (fresh, forces stale workers to re-sync)
+        - permanent audit record: "repaired FROM <old> TO <target_state> BY <authorized_by>
+          ON <now> BECAUSE <reason>" — appended, never deleted
+        - if obj had OPEN obligations and target_state is terminal, run the same obligation
+          transfer as complete_object() (Law 20 applies uniformly)
+    Failure:
+        - if validation fails: object remains FROZEN, no partial write, human must retry or
+          choose ABANDONED_UNREPAIRABLE explicitly (which itself still triggers Law 20)
+    """
+```
+
+---
+
+## 8. Test Matrix — Part A: Crash/Restart
+
+Each row: kill the process at the named point, restart, assert the resulting state.
+
+| # | Kill point | Required post-restart state | Law(s) tested |
+|---|---|---|---|
+| 1 | Before `Action.status` write to `EXECUTING` | `Action.status == PENDING`; no external effect occurred | 8 |
+| 2 | After `EXECUTING` write commits, before external call issued | `Action.status == UNKNOWN_OUTCOME` on recovery (never assume it didn't start) | 9 |
+| 3 | During external call (network cut mid-request) | `Action.status == UNKNOWN_OUTCOME` | 9 |
+| 4 | External call returns success, before `Observation` persisted | `Action.status == UNKNOWN_OUTCOME`, no `Observation` row exists | 8, 9 |
+| 5 | After `Observation` persisted, before `Action.status → OBSERVED` commits | On restart: either both committed or neither (single transaction) — assert never `Observation` exists with `Action.status == PENDING/EXECUTING` | 2, 8 |
+| 6 | During `Verification` run | `Verification.result == PENDING` or `RUNNING`; owning Claim not treated as established | 16 |
+| 7 | Between `Plan.SUPERSEDED` write and new `Plan.ACTIVE`-equivalent (`active_plan_id`) write, if implemented as two statements | Must be impossible to observe this intermediate state — if observed, test fails and implementation isn't atomic per §4 | 15, 35 |
+| 8 | During `complete_object()`'s obligation-transfer loop (some obligations transferred, some not) | Must be impossible to observe partial transfer — either all `OPEN` subtree obligations moved to UOR or none did | 20 |
+| 9 | During `repair_object()`, after validation passes, before commit | Object remains `FROZEN` (repair did not partially apply) | 30 |
+| 10 | Immediately after a successful `repair_object()` commit | A worker holding a pre-repair revision must fail its next operation and re-read | 30 |
+
+For every row: the assertion is never "probably fine" — it's one of `KNOWN_NOT_STARTED`,
+`KNOWN_STARTED`, `KNOWN_COMPLETED`, `UNKNOWN_OUTCOME`, or `INTEGRITY_VIOLATION`. If the test can't
+categorize the post-restart state as one of these five, the implementation has a bug even if
+nothing "crashed" in the traditional sense.
+
+## 9. Test Matrix — Part B: Concurrent Mutation
+
+Each row: fire both operations concurrently (or in the specified interleaving), assert exactly one
+of the documented outcomes.
+
+| # | Operation A | Operation B | Required outcome |
+|---|---|---|---|
+| 1 | `activate_plan(T, A, rev=5)` | `activate_plan(T, B, rev=5)` | Exactly one succeeds; the loser receives current `Task` state, not a generic error |
+| 2 | `activate_plan(T, B, rev=5)` | `cancel_task(T, rev=5)` | Exactly one succeeds; if cancel wins, Plan B never becomes active; if activate wins, cancel must re-read and fail cleanly — never both landing |
+| 3 | `complete_task(T, rev=5)` | `activate_plan(T, B, rev=5)` | Same as #2, substituting completion for cancellation |
+| 4 | `transfer_obligation(O, "UOR", expected_owner=T)` (triggered by Task T completing) | `transfer_obligation(O, "UOR", expected_owner=T)` (triggered by Goal G completing concurrently) | Exactly one commits; the second reads `owner == UOR` already and no-ops rather than erroring or duplicating |
+| 5 | `repair_object(X, rev=51, state=A, human_1)` | `repair_object(X, rev=51, state=B, human_2)` | Exactly one commits; the loser receives `STALE_REPAIR` + current state, must re-propose |
+| 6 | Worker executing Step under Plan A (stale local read) | `activate_plan(T, B, ...)` supersedes Plan A mid-execution | Worker's next state-dependent operation must re-validate `active_plan_id` and abort/replan — must not silently continue acting under Plan A |
+| 7 | `retry_action(X)` triggered by heartbeat timeout | `retry_action(X)` triggered by manual user retry | Exactly one creates the new Action attempt; retry budget decrements once, not twice |
+| 8 | `add_dependency(StepB, depends_on=StepA)` | `add_dependency(StepA, depends_on=StepB)` (racing) | At most one commits; the acyclic check must run against the committed graph at commit time, not a pre-check read earlier |
+| 9 | `abandon_obligation(O, human_1)` | `resolve_obligation(O, verification_result)` (an automated resolution arriving concurrently) | Exactly one wins via revision check; no obligation ends up simultaneously `ABANDONED` and `RESOLVED` |
+
+For every row, additionally assert globally: no duplicate `Action` identity was created, no
+`Task`/`Goal`/`Plan` re-entered a lifecycle state after reaching a terminal one, and revision
+numbers strictly increased with no gaps unaccounted for by a rejected write.
+
+---
+
+## 10. What OpenCode should build, in order
+
+1. Schemas + enums above, as actual code, with the persistence layer (SQLite to start).
+2. `activate_plan`, `complete_object`, `transfer_obligation`, `abandon_obligation` — these four
+   functions, fully, before anything else, since Part A/B tests 1–8 all exercise them directly.
+3. Crash-injection harness capable of killing the process at the 10 named points (likely via
+   explicit `raise SimulatedCrash()` calls inserted at each labeled boundary during test runs, not
+   real process kills, for speed — real kill-and-restart as a slower integration test afterward).
+4. Concurrency harness (threads or async tasks racing the 9 named operation pairs).
+5. Only after 1–4 pass: wire up a single real capability (`file_write` is the obvious first one),
+   a real Observation/Evidence pipeline for it, and one end-to-end Goal→Task→Plan→Action path.
+6. `repair_object` and the Integrity Freeze detection path — deliberately last, since it's the
+   part that should be exercised least often and is the most dangerous to get subtly wrong.

@@ -1,0 +1,13 @@
+[project]
+name = "jarvis-v5"
+version = "0.1.0"
+description = "JARVIS V5 State Foundation — canonical state, atomic mutations, obligations, evidence"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

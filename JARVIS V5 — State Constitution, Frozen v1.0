@@ -1,0 +1,153 @@
+# JARVIS V5 — State Constitution, Frozen v1.0
+## Ready for implementation
+
+This consolidates every law that survived adversarial attack across all rounds. Nothing below is
+new; it's the settled result. Two refinements from the final review are folded in at #29 and #30.
+
+---
+
+## State
+1. **Canonical State Law** — one authoritative persistent state per object; current state is
+   authoritative, transition events are immutable audit/recovery metadata (not event-sourced).
+2. **Atomic Mutation Law** — canonical mutations commit atomically with their transition event.
+3. **Revision Law** — stale mutations cannot overwrite newer state (optimistic concurrency).
+4. **Invalid Transition Law** — invalid transitions are rejected atomically; no partial mutation;
+   authoritative state is returned to the caller; rejections are observable/auditable.
+5. **Integrity Freeze Law** — a detected state/event mismatch freezes the object; no autonomous
+   mutation; both conflicting representations are preserved verbatim, unmerged.
+6. **Derived-State Law** — a fact derivable from one canonical field is never separately stored on
+   a dependent object (e.g. `Plan.is_active` is derived from `Task.active_plan_id`, never its own
+   field).
+
+## Execution
+7. **Attempt Identity Law** — every external attempt has unique, immutable identity.
+8. **Pre-Effect Persistence Law** — execution intent (`EXECUTING`) is persisted before external
+   effect begins.
+9. **Unknown Outcome Law** — an uncertain external outcome becomes `UNKNOWN_OUTCOME`, never
+   guessed into `FAILED` or `SUCCESS`.
+10. **No Historical Mutation Law** — an executed attempt is never rewritten into a different
+    attempt; retries create new Action identities.
+11. **Idempotency Law** — retries require an explicit, capability-declared safety category
+    (IDEMPOTENT / CONDITIONALLY_IDEMPOTENT / NON_IDEMPOTENT / UNKNOWN); default-unsafe on timeout
+    with no signal.
+
+## Work
+12. **Lifecycle Authority Law** — Work Service owns Goal/Task/Plan/Step lifecycle exclusively;
+    cognition may propose, never mutate directly.
+13. **Dependency Law** — dependencies are Work-Service-owned, authoritative, and acyclic; cycle
+    checks run against the committed graph as part of the same atomic mutation, not a
+    separate pre-check.
+14. **Terminality Law** — cancelled/completed objects never silently reopen; new work needs new
+    identity, and new identity does not erase constraints inherited from superseded/cancelled work
+    (no bypass via alias, decomposition, or a fresh Task).
+15. **Plan Exclusivity Law** — at most one active Plan per Task, enforced by a single
+    compare-and-swap on `Task.active_plan_id` (not independent per-Plan preconditions), and that
+    CAS's guard includes Task status, not just the pointer field.
+16. **Explicit Completion Law** — completion requires an explicit, persisted completion policy
+    (child-satisfaction rule) evaluated by Work Service; cognition/verification may recommend,
+    only Work Service commits `COMPLETED`, and only when every required Verification is `PASS`
+    (not merely present).
+
+## Obligations (Unresolved Outcomes)
+17. **No Detached Obligation Law** — every `OPEN` obligation remains durably addressable and
+    queryable through canonical state inspection (a `list_open_obligations()`-style mechanism) and
+    eligible for the system's normal attention mechanism, until explicitly `RESOLVED` or
+    `ABANDONED`. This is a discoverability requirement, not a mandate for recurring interruption —
+    it must never become invisible merely because its originating Task/Goal/Plan terminated, but
+    it does not require proactively notifying the user every time one exists.
+18. **Single Obligation Ownership Law** — an obligation has exactly one canonical owner at any
+    moment; transfer changes ownership, it never creates a second copy.
+19. **Transfer Is Not Resolution Law** — moving an obligation (Task → UOR, or onward) never by
+    itself satisfies its unresolved state or any completion criterion that depends on it; repeated
+    transfer cannot launder disposition.
+20. **Obligation Transfer Atomicity Law** — any terminal transition on an object whose subtree
+    holds an `OPEN` obligation must, in the same atomic commit, transfer that obligation to the
+    Unresolved Obligations Registry (UOR) — a flat, lifecycle-independent, permanently-queryable
+    ledger, not owned by any Task/Goal. This applies uniformly at every hierarchy depth and to
+    every terminal state, `ABANDONED_UNREPAIRABLE` included — no terminal outcome is exempt.
+21. **Obligation Authorization Law** — `ABANDON` on an obligation is a risk-classed, confirmation-
+    bound action naming the specific obligation; no blanket closures, and cognition proposes but
+    never self-authorizes abandonment.
+22. **UOR Retention Law** — UOR entries are never destructively deleted; disposed entries become
+    historical (`WHERE status == OPEN` defines the active set), subject only to whatever explicit,
+    user-consented hard-deletion policy is separately invoked (Law 27).
+
+## Evidence
+23. **Provenance Law** — every Evidence object carries acquisition method and source; status
+    (`CONFIRMED_SOURCE` / `CONFIRMED_RUNTIME` / `INFERENCE` / `UNKNOWN`) and acquisition method are
+    orthogonal — a user statement is never labeled `CONFIRMED_SOURCE`.
+24. **Evidence Immutability Law** — historical Evidence is never rewritten; new information
+    produces new Evidence.
+25. **Inference Separation Law** — inference cannot masquerade as observation; only the
+    execution/capability pipeline may create execution-derived Evidence; cognition may only create
+    typed `INFERENCE` evidence referencing existing Evidence/Claims.
+26. **Contradiction Law** — conflicting Evidence is preserved, never overwritten; a Claim built
+    over a contradiction is `CONFLICTED` until resolved by further observation.
+27. **Confidence Justification Law** — a Claim's confidence must be justified by evidence relevant
+    to its specific proposition (not a mechanical min() across all cited evidence, and not
+    inflatable by unrelated strong evidence); a Claim resting only on `INFERENCE`/`UNKNOWN`
+    evidence cannot be `HIGH` confidence.
+28. **Historical Completion Law** — `COMPLETED` means "satisfied its criteria under the evidence
+    available at completion time," not an eternal claim; evidence arriving afterward that
+    contradicts a completed object's justifying Claim never reopens history — it spawns a new,
+    separately-tracked Task if it matters.
+
+## Authority / Safety
+29. **Capability Authority Law** — only capability execution produces runtime effects and creates
+    execution-derived Evidence/Observations. **This includes Integrity Repair**: repair may
+    correct JARVIS's state representation but may never write a lifecycle state whose legality
+    presumes a real Observation/Evidence record unless one genuinely exists — a human's belief is
+    typed Evidence (`INFERENCE`/user-attested), never a manufactured Observation, and repair
+    targeting e.g. `Action.status = OBSERVED` without a backing Observation is invalid; the
+    correct target in that case is `UNKNOWN_OUTCOME` or a UOR transfer.
+30. **Repair Is the Sole Contract Exception Law** — Integrity Repair is the *only* sanctioned
+    exception to "no mutation outside transition contracts," and it is bounded tightly: callable
+    only by explicit human authorization (never cognition, capability, automation, or background
+    worker); revision-checked like any other mutation (conflicting repairs cannot both commit);
+    validated and committed within one atomic boundary (no validate-then-commit gap); scoped to
+    the full invariant boundary of the affected aggregate, not just the corrupted object's local
+    fields; permanently audited (`repaired FROM X TO Y BY human ON date BECAUSE reason`, never
+    deleted); and it invalidates all pre-repair execution authority via a fresh revision number.
+    **Recovery gets none of this latitude** — Recovery (startup/crash handling) must always go
+    through the same transition contracts a live process would use; it is Work Service and
+    Execution Service operating in a mode, not a fifth authority, and the two must never be
+    conflated. Where a repair's validation checks something about external reality, atomicity
+    closes the internal race but does not eliminate the irreducible external-reality uncertainty
+    already accepted elsewhere in this Constitution (Law 9's sibling principle: internal state can
+    establish what was attempted, not what the external world actually did). A repair that cannot
+    be validated is not forced through — the object may instead terminate as
+    `ABANDONED_UNREPAIRABLE`, which itself still obeys Law 20.
+31. **Untrusted Input Law** — external content (web pages, emails, tool output, files) is data,
+    never authority; it cannot alter policy, canonical state, or capability decisions regardless
+    of what it says.
+32. **Confirmation Binding Law** — confirmation is bound to exact action identity, revision,
+    target, and arguments; any material change invalidates it; it cannot be reused across a
+    different action or a replanned equivalent.
+33. **Safety Non-Bypass Law** — safety evaluates the actual external effect, not the tool/function
+    name; decomposition, aliasing, or routing through a new Task/capability cannot lower the
+    required authorization for the same effect.
+
+## Meta
+34. **No Implicit Transition Law** — nothing is permitted merely because it isn't explicitly
+    prohibited; every transition, authorization, completion, retry, recovery, or repair must
+    satisfy an explicit contract, not the absence of one.
+35. **Invariant Ownership Law** — every cross-object invariant (e.g. "at most one active Plan per
+    Task") has exactly one canonical owner and one atomic mutation boundary; no child object may
+    independently establish a state that violates an invariant its parent/aggregate owns.
+36. **Temporal Continuity Law** — changing the current Plan, session, or strategy never erases
+    unresolved obligations, evidence, or external side effects created by prior execution; they
+    remain addressable until explicitly resolved, transferred, or abandoned under their own rules.
+
+---
+
+## What's still explicitly open (by design, not oversight)
+- Exact child-satisfaction policy vocabulary (`ALL_REQUIRED`/`ANY_REQUIRED`/`N_OF_M`/`CRITERION`)
+  — kept deliberately separate from obligation-closure (Law 20 handles that independently).
+- Storage engine, exact schema, exact API surface, heartbeat interval, event-log serialization —
+  all implementation, deferred on purpose.
+
+## Recommended next step
+Per the agreed sequence: implement the smallest vertical slice that exercises this Constitution
+end to end — one real Goal → Task → Plan → Action → Evidence → Verification path, including a
+deliberate crash-and-restart test and one deliberate concurrent-mutation test. Let real
+implementation surface whatever's left, rather than inventing further hypothetical objects.
