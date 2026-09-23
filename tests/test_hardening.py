@@ -470,6 +470,57 @@ class TestAbandonTypeGate:
         assert isinstance(r, Rejected) and r.reason == "INVALID_TRANSITION"
 
 
+# ── Coverage-verification round 3: bind target existence + action routing ───
+
+class TestBindTargetExistence:
+    def test_bind_to_nonexistent_object_rejected_no_orphan(self, store):
+        """A binding row to a phantom object proves nothing about anything."""
+        goal, task, plan, step = make_goal_task_plan_step(store)
+        ev = evidence.create_inference_evidence(store, "t", {"g": 1}, relevance_to=task.id).value
+        claim = evidence.create_claim(store, "c", based_on=[ev.id], made_by="t",
+                                      confidence=ClaimConfidence.LOW).value
+        ver = evidence.create_verification(store, claim.id, "m", "deterministic").value
+        r = work.bind_required_verification(store, "goal_doesnt_exist", ver.id)
+        assert isinstance(r, Rejected) and r.reason == "NOT_FOUND"
+        n = store.read().execute("SELECT COUNT(*) AS n FROM required_verifications").fetchone()["n"]
+        assert n == 0
+
+    def test_bind_to_step_rejected(self, store):
+        """Completion authority is Task|Goal; a step binding can never fire."""
+        goal, task, plan, step = make_goal_task_plan_step(store)
+        ev = evidence.create_inference_evidence(store, "t", {"g": 1}, relevance_to=task.id).value
+        claim = evidence.create_claim(store, "c", based_on=[ev.id], made_by="t",
+                                      confidence=ClaimConfidence.LOW).value
+        ver = evidence.create_verification(store, claim.id, "m", "deterministic").value
+        r = work.bind_required_verification(store, step.id, ver.id)
+        assert isinstance(r, Rejected) and r.reason == "INVALID_TRANSITION"
+
+
+class TestTransitionObjectActionRouting:
+    def test_transition_object_on_action_rejected_not_keyerror(self, store):
+        """An action id passed to the Work transition surface is a routing
+        error, typed as INVALID_TRANSITION — never an unhandled KeyError."""
+        goal, task, plan, step = make_goal_task_plan_step(store)
+        task = activated(store, task, plan)
+        action = pending_action(store, step)
+        from v5.enums import ActionStatus
+        r = work.transition_object(store, action.id, ActionStatus.OBSERVED, action.revision)
+        assert isinstance(r, Rejected) and r.reason == "INVALID_TRANSITION"
+
+    def test_abandoned_object_cannot_transition(self, store):
+        """ABANDONED_UNREPAIRABLE is integrity-terminal: no transition out."""
+        goal, task, plan, step = make_goal_task_plan_step(store)
+        task = activated(store, task, plan)
+        auth = repair_mod.authorize("debasish")
+        r = repair_mod.abandon_unrepairable(store, auth, task.id, "unfixable",
+                                            expected_revision=task.revision)
+        assert isinstance(r, Ok), r
+        from v5.enums import TaskStatus
+        cur = work.load_task(store.read(), task.id)
+        r2 = work.transition_object(store, task.id, TaskStatus.BLOCKED, cur.revision)
+        assert isinstance(r2, Rejected) and r2.reason == "FROZEN"
+
+
 # ── Audit D/E: dependency graph repair discipline (Law 13) ───────────────────
 
 class TestDependencyGraphRepairDiscipline:

@@ -453,8 +453,21 @@ def bind_required_verification(store: Store, object_id: str, verification_id: st
     """Persist which Verifications a completion criterion requires (Law 16:
     completion requires every required Verification PASS — not merely
     present). This binding table is the storage representation of "required
-    Verification" (contract leaves the representation unspecified)."""
+    Verification" (contract leaves the representation unspecified).
+
+    Both endpoints must exist: a dangling binding to a nonexistent object is
+    an orphan row that proves nothing about anything (the bound object is the
+    thing completion is claimed for). The completion authority supports
+    Task|Goal (`complete_object`); bindings to other kinds have no effect and
+    are rejected at bind time — fail fast, not silently."""
     with store.write() as conn:
+        obj, kind = _load_object(conn, object_id)
+        if obj is None:
+            return Rejected(R_NOT_FOUND, f"binding target {object_id}", None)
+        if kind not in ("task", "goal"):
+            return Rejected(R_INVALID_TRANSITION,
+                            f"required-verification bindings apply to completable Task|Goal, got {kind}",
+                            obj)
         if conn.execute("SELECT 1 FROM verifications WHERE id = ?", (verification_id,)).fetchone() is None:
             return Rejected(R_NOT_FOUND, f"verification {verification_id}", None)
         conn.execute(
@@ -599,24 +612,32 @@ def _terminal_transition(store: Store, table: str, obj_id: str, expected_revisio
 
 def transition_object(store: Store, obj_id: str, target_status, expected_revision: int) -> Result:
     """Explicit non-terminal transition (pause/resume/block/unblock etc.).
-    Every transition must satisfy the table — nothing implicit (Law 34)."""
+    Every transition must satisfy the table — nothing implicit (Law 34).
+
+    Work objects only: actions execute through the Execution Service's own
+    contracted transitions (Law 8/9/14), so an action id here is a
+    routing error, not a transition — rejected, never a KeyError crash."""
     with store.write() as conn:
         obj, kind = _load_object(conn, obj_id)
         if obj is None:
             return Rejected(R_NOT_FOUND, obj_id, None)
         if obj.revision != expected_revision:
             return Rejected(R_STALE_REVISION, f"revision={obj.revision} expected={expected_revision}", obj)
-        integrity = getattr(obj, "integrity", None)
-        if integrity is not None and integrity.value == "FROZEN":
-            store.audit(conn, obj_id, "rejected", None, None,
-                        reason="frozen objects cannot transition (Law 5)")
-            return Rejected(R_FROZEN, "frozen objects cannot transition (Law 5)", obj)
+        if kind == "action":
+            return Rejected(R_INVALID_TRANSITION,
+                            "actions transition through the Execution Service (begin/mark/...), "
+                            "not transition_object (Law 12: authority separation)", obj)
         table, enum, transitions = {
             "goal": ("goals", GoalStatus, GOAL_TRANSITIONS),
             "task": ("tasks", TaskStatus, TASK_TRANSITIONS),
             "plan": ("plans", PlanStatus, PLAN_TRANSITIONS),
             "step": ("steps", StepStatus, STEP_TRANSITIONS),
         }[kind]
+        integrity = getattr(obj, "integrity", None)
+        if integrity is not None and integrity.value in ("FROZEN", "ABANDONED_UNREPAIRABLE"):
+            store.audit(conn, obj_id, "rejected", None, None,
+                        reason=f"integrity={integrity.value} — no autonomous transition (Law 5/29)")
+            return Rejected(R_FROZEN, f"integrity={integrity.value} — no autonomous transition (Law 5)", obj)
         allowed = transitions.get(obj.status, frozenset())
         if target_status not in allowed:
             store.audit(conn, obj_id, "rejected", obj.status.value, None,

@@ -384,6 +384,47 @@ the job.
 
 **Test**: `tests/test_hardening.py::TestRuntimeEvidenceProvenance::test_schema_migration_adds_column_and_preserves_rows` + `::test_migration_is_idempotent`.
 
+## 25. Coverage-verification round 3 — two latent validation gaps closed
+
+Surfaced by re-auditing the seven constitutional modules end-to-end for
+"authorizes a B that doesn't provably belong to/derive from A":
+
+**(a) `bind_required_verification` object-side check (Law 16).** Previously it
+verified the Verification existed but not the bound object — a binding to a
+phantom id wrote an orphan row proving nothing. Now both endpoints must
+exist, and the object must be a completable Task|Goal (the completion
+authority's contract covers those two kinds only — step-bindings could never
+fire). Fail fast, no silent orphan rows.
+
+**(b) `transition_object` action routing + integrity parity (Law 12/5/29).**
+An action id passed through the Work transition surface hit the
+`{...}[kind]` lookup with no `"action"` entry — raising an unhandled
+`KeyError` inside a transaction instead of a typed rejection. Actions now
+route explicitly: rejected `INVALID_TRANSITION` with Law 12 authority-
+separation rationale (actions transition through the Execution Service).
+The same fix restored the revision CAS that the rescue edit had dropped
+(regression caught immediately by test_law3_revision_cas — proving the CAS
+suite works) and added `ABANDONED_UNREPAIRABLE` to the integrity guard so a
+terminally-abandoned object can no longer transition (parity with
+`_terminal_transition` and `complete_object`).
+
+**Explicitly re-checked and found clean (not re-listed in the table):**
+- `execution.freeze_action` — revision CAS already present since the
+  foundation (single-writer store makes the bump atomic).
+- `safety.create_confirmation` — a confirmation staged for a nonexistent
+  action is *inert*: the execution gate only evaluates confirmations for the
+  real action being executed, and `begin_executing` rejects the action
+  first. No phantom authorization path exists; no law violated. No fix.
+- `recovery.recover` — every mutation goes through ordinary contracted
+  transitions (`mark_unknown_outcome`, `freeze_action`); the loop is
+  idempotent and stateless. Law 30 holds.
+- `repair._TERMINAL_SETS` + `supersede_plan` — terminal repairs transfer
+  obligations and supersede CAS'es the old plan's revision inside the same
+  transaction; verified against Contract crash #7.
+
+**Test**: `tests/test_hardening.py::TestBindTargetExistence` (2),
+`::TestTransitionObjectActionRouting` (2).
+
 ---
 
 ## Laws not mechanically testable at this stage (with reasons)
