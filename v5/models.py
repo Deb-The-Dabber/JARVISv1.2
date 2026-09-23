@@ -120,6 +120,12 @@ class Evidence:
     relevance_to: str
     timestamp: datetime
     content: Any                       # immutable once written (Law 24)
+    origin_observation_id: str | None = None  # Law 23 provenance: the Observation
+                                             # this evidence derives from (runtime
+                                             # evidence only; inference/user evidence
+                                             # has none). This is the link that lets
+                                             # obligation resolution prove the chain
+                                             # Obligation→Action→Observation→Evidence.
 
 
 @dataclass

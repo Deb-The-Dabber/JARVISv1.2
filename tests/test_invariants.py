@@ -233,7 +233,7 @@ class TestWorkLaws12to16:
 class TestObligationLaws17to22:
     def test_law17_no_detached_obligation(self, store):
         goal, task, plan, step = make_goal_task_plan_step(store)
-        obl = obligations.create_obligation(store, "a", task.id, "r", "e")
+        obl = obligations.create_obligation(store, "a", task.id, "r", "e").value
         # discoverable while owned
         assert obligations.load_obligation(store.read(), obl.id) is not None
         assert len(obligations.list_open_obligations(store, owner=task.id)) == 1
@@ -244,7 +244,7 @@ class TestObligationLaws17to22:
 
     def test_law18_single_ownership(self, store):
         goal, task, plan, step = make_goal_task_plan_step(store)
-        obl = obligations.create_obligation(store, "a", task.id, "r", "e")
+        obl = obligations.create_obligation(store, "a", task.id, "r", "e").value
         other = work.create_task(store, goal.id, CompletionPolicy(rule="ALL_REQUIRED")).value
         r = obligations.transfer_obligation(store, obl.id, other.id, expected_owner=task.id)
         assert isinstance(r, Ok)
@@ -255,7 +255,7 @@ class TestObligationLaws17to22:
 
     def test_law19_transfer_is_not_resolution(self, store):
         goal, task, plan, step = make_goal_task_plan_step(store)
-        obl = obligations.create_obligation(store, "a", task.id, "r", "e")
+        obl = obligations.create_obligation(store, "a", task.id, "r", "e").value
         obligations.transfer_obligation(store, obl.id, UOR, expected_owner=task.id)
         loaded = obligations.load_obligation(store.read(), obl.id)
         assert loaded.disposition == ObligationDisposition.OPEN
@@ -265,8 +265,8 @@ class TestObligationLaws17to22:
 
     def test_law20_terminal_transfer_atomic(self, store):
         goal, task, plan, step = make_goal_task_plan_step(store)
-        o1 = obligations.create_obligation(store, "a1", task.id, "r", "e")
-        o2 = obligations.create_obligation(store, "a2", task.id, "r", "e")
+        o1 = obligations.create_obligation(store, "a1", task.id, "r", "e").value
+        o2 = obligations.create_obligation(store, "a2", task.id, "r", "e").value
         task = work.transition_object(store, task.id, TaskStatus.ACTIVE, task.revision).value
         r = work.cancel_task(store, task.id, task.revision)
         moved = r.value["obligations_transferred"]
@@ -277,13 +277,13 @@ class TestObligationLaws17to22:
 
     def test_law21_abandon_requires_named_authorization(self, store):
         goal, task, plan, step = make_goal_task_plan_step(store)
-        obl = obligations.create_obligation(store, "a", task.id, "r", "e")
+        obl = obligations.create_obligation(store, "a", task.id, "r", "e").value
         r = obligations.abandon_obligation(store, obl.id, "", "no human", 0)
         assert isinstance(r, Rejected) and r.reason == "ABANDON_REQUIRES_HUMAN"
 
     def test_law22_uor_retention(self, store):
         goal, task, plan, step = make_goal_task_plan_step(store)
-        obl = obligations.create_obligation(store, "a", task.id, "r", "e")
+        obl = obligations.create_obligation(store, "a", task.id, "r", "e").value
         task = work.transition_object(store, task.id, TaskStatus.ACTIVE, task.revision).value
         work.cancel_task(store, task.id, task.revision)
         # resolve it — the row remains as history, never deleted

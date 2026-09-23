@@ -135,7 +135,7 @@ class TestRace3PlanVsCompletion:
 class TestRace4UorTransferRace:
     def test_double_transfer_one_owner(self, store):
         goal, task, plan, step = make_goal_task_plan_step(store)
-        obl = obligations.create_obligation(store, "act_1", task.id, "r", "e")
+        obl = obligations.create_obligation(store, "act_1", task.id, "r", "e").value
 
         r_a, r_b = _race(
             # two terminal paths concurrently transfer the SAME obligation to UOR
@@ -155,7 +155,7 @@ class TestRace4UorTransferRace:
 
     def test_task_and_goal_terminal_both_transfer_once(self, store):
         goal, task, plan, step = make_goal_task_plan_step(store)
-        obl = obligations.create_obligation(store, "act_1", task.id, "r", "e")
+        obl = obligations.create_obligation(store, "act_1", task.id, "r", "e").value
         task = work.transition_object(store, task.id, TaskStatus.ACTIVE, task.revision).value
 
         # Task completing AND Goal completing concurrently — both would transfer
@@ -280,7 +280,7 @@ class TestRace8DependencyRace:
 class TestRace9AbandonVsResolve:
     def test_abandon_vs_resolve_exactly_one(self, store):
         goal, task, plan, step = make_goal_task_plan_step(store)
-        obl = obligations.create_obligation(store, "act_1", task.id, "r", "e")
+        obl = obligations.create_obligation(store, "act_1", task.id, "r", "e").value
         # a PASS verification to justify resolution
         ev = evidence.record_runtime_evidence(store, "obs_nonexistent_guard", source="test",
                                             relevance_to=task.id, content={})
@@ -291,7 +291,7 @@ class TestRace9AbandonVsResolve:
                 conn.execute(
                     "INSERT INTO observations (id, action_id, captured_at, raw_result, execution_source) "
                     "VALUES (?,?,?,?,?)",
-                    (obs_id, "act_none", "2026-01-01T00:00:00Z", "{}", "test"),
+                    (obs_id, "act_1", "2026-01-01T00:00:00Z", "{}", "test"),
                 )
             ev = evidence.record_runtime_evidence(store, obs_id, source="test",
                                                   relevance_to=task.id, content={"ok": True})

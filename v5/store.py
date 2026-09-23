@@ -79,7 +79,8 @@ CREATE TABLE IF NOT EXISTS evidence (
     source TEXT NOT NULL,
     relevance_to TEXT NOT NULL,
     timestamp TEXT NOT NULL,
-    content TEXT NOT NULL
+    content TEXT NOT NULL,
+    origin_observation_id TEXT
 );
 CREATE TABLE IF NOT EXISTS claims (
     id TEXT NOT NULL,
@@ -193,6 +194,25 @@ class Store:
         self._conn.executescript(_SCHEMA)  # executescript manages its own commits
         self._armed: dict[str, bool] = {}
         self._write_lock = threading.Lock()
+        self._apply_migrations()
+
+    # ── schema migrations (Contract preamble-consistent) ─────────────────────
+    # SQLite-native versioning via PRAGMA user_version. Additive upgrades only
+    # (ALTER TABLE ... ADD COLUMN). Never destructive. Nothing here invents a
+    # framework; each step is idempotent and transaction-bounded.
+    SCHEMA_VERSION = 2
+
+    def _apply_migrations(self):
+        current = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if current >= self.SCHEMA_VERSION:
+            return
+        with self.write() as conn:
+            # v2: Evidence gains Law-23 provenance to its origin Observation.
+            if current < 2:
+                cols = [r[1] for r in conn.execute("PRAGMA table_info(evidence)").fetchall()]
+                if "origin_observation_id" not in cols:
+                    conn.execute("ALTER TABLE evidence ADD COLUMN origin_observation_id TEXT")
+            conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
 
     def close(self):
         try:

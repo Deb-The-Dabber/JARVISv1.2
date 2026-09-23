@@ -87,12 +87,25 @@ def save_new_obligation(conn, obl: Obligation):
     )
 
 
+def _validate_owner_locked(conn, owner: str) -> str | None:
+    """Laws 17/18: an obligation's canonical owner is either the UOR sentinel
+    or a real existing Task. Returns a rejection reason, or None if valid."""
+    if owner == UOR:
+        return None
+    if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (owner,)).fetchone() is None:
+        return "OBLIGATION_OWNER_INVALID"
+    return None
+
+
 def create_obligation(store: Store, origin_action_id: str, owner: str,
                       unknown_reason: str, possible_external_effect: str,
                       resolution_budget: int = 3,
-                      safe_retry_conditions: str | None = None) -> Obligation:
-    """Create an OPEN obligation owned by `owner` (a task id). Called by the
-    Execution Service when an Action's outcome becomes uncertain (Law 9)."""
+                      safe_retry_conditions: str | None = None) -> Result:
+    """Create an OPEN obligation owned by `owner`. Laws 17/18: the owner must
+    be the UOR sentinel or a REAL existing Task — validated inside the same
+    transaction as creation, so no orphan/detached obligation row can commit.
+    Called by the Execution Service when an Action's outcome becomes
+    uncertain (Law 9)."""
     obl = Obligation(
         id=new_id("obligation"),
         origin_action_id=origin_action_id,
@@ -106,8 +119,13 @@ def create_obligation(store: Store, origin_action_id: str, owner: str,
         history=[],
     )
     with store.write() as conn:
+        reason = _validate_owner_locked(conn, owner)
+        if reason is not None:
+            return Rejected(reason,
+                            f"owner must be the UOR sentinel or an existing task id, got {owner!r} "
+                            "(Laws 17/18)", None)
         save_new_obligation(conn, obl)
-    return obl
+        return Ok(obl)
 
 
 # ── atomic operations (Contract §6) ─────────────────────────────────────────
@@ -138,6 +156,12 @@ def _transfer_locked(conn, obligation_id: str, new_owner: str, expected_owner: s
         return Ok(noop=True)  # idempotent no-op — never error, never duplicate
     if obl.owner != expected_owner:
         return Rejected(R_WRONG_OWNER, f"owner={obl.owner} expected={expected_owner}", obl)
+    # Law 18: ownership moves only to a canonical owner (a real Task or UOR)
+    invalid = _validate_owner_locked(conn, new_owner)
+    if invalid is not None:
+        return Rejected(invalid,
+                         f"new owner must be the UOR sentinel or an existing task id, got {new_owner!r} "
+                         "(Law 18)", obl)
     conn.execute(
         "UPDATE obligations SET owner = ?, revision = revision + 1 WHERE id = ? AND revision = ?",
         (new_owner, obligation_id, obl.revision),
@@ -185,9 +209,17 @@ def _abandon_locked(conn, obligation_id: str, authorized_by: str, reason: str,
 
 def resolve_obligation(store: Store, obligation_id: str, verification_id: str,
                        expected_revision: int, resolved_by: str = "system") -> Result:
-    """Resolve an OPEN obligation. Resolution must be justified by a
-    Verification whose result is PASS (Contract §9 row 9 names the racing
-    counterpart; the PASS requirement is the smallest justification rule)."""
+    """Resolve an OPEN obligation. Resolution requires:
+      1. the supplied Verification exists and has result == PASS, AND
+      2. provenance: the Verification's claim cites at least one piece of
+         runtime Evidence that derives (via its origin Observation) from the
+         SAME Action that created the obligation (Law 23/25/29 — a PASS
+         verification about an unrelated action must not resolve this
+         obligation).
+
+    Canonical chain walked: Verification.verifies → Claim.based_on →
+    Evidence.origin_observation_id → Observation.action_id ==
+    Obligation.origin_action_id."""
     with store.write() as conn:
         row = conn.execute("SELECT * FROM obligations WHERE id = ?", (obligation_id,)).fetchone()
         if row is None:
@@ -197,9 +229,13 @@ def resolve_obligation(store: Store, obligation_id: str, verification_id: str,
             return Rejected(R_STALE_REVISION, f"revision={obl.revision} expected={expected_revision}", obl)
         if obl.disposition.value != "OPEN":
             return Rejected(R_NOT_OPEN, f"disposition={obl.disposition.value}", obl)
-        vrow = conn.execute("SELECT result FROM verifications WHERE id = ?", (verification_id,)).fetchone()
+        vrow = conn.execute("SELECT * FROM verifications WHERE id = ?", (verification_id,)).fetchone()
         if vrow is None or vrow["result"] != "PASS":
             return Rejected(R_NOT_OPEN, "resolution requires a PASS verification", obl)
+        if not _verification_concerns_obligation_locked(conn, vrow, obl):
+            return Rejected("RESOLUTION_PROVENANCE",
+                            f"verification {verification_id} does not trace to the obligation's "
+                            f"origin action {obl.origin_action_id} (Laws 23/25/29)", obl)
         conn.execute(
             "UPDATE obligations SET disposition = 'RESOLVED', revision = revision + 1 "
             "WHERE id = ? AND revision = ?",
@@ -209,9 +245,35 @@ def resolve_obligation(store: Store, obligation_id: str, verification_id: str,
             "INSERT INTO obligation_events (obligation_id, kind, from_owner, to_owner, authorized_by, reason, timestamp) "
             "VALUES (?,?,?,?,?,?,?)",
             (obligation_id, EV_RESOLVED, obl.owner, None, resolved_by,
-             f"verification {verification_id} PASS", iso(utcnow())),
+             f"verification {verification_id} PASS (provenance to {obl.origin_action_id})",
+             iso(utcnow())),
         )
         return Ok()
+
+
+def _verification_concerns_obligation_locked(conn, vrow, obl) -> bool:
+    """Walk Verification → Claim → cited Evidence → origin Observation, and
+    check that at least one cited runtime evidence derives from an
+    Observation of the obligation's origin Action. INFERENCE/UNKNOWN evidence
+    carries no observation provenance and cannot establish the link."""
+    claim_row = conn.execute(
+        "SELECT based_on FROM claims WHERE id = ? ORDER BY version DESC LIMIT 1",
+        (vrow["verifies"],),
+    ).fetchone()
+    if claim_row is None:
+        return False
+    for ev_id in jload(claim_row["based_on"], []):
+        ev = conn.execute(
+            "SELECT origin_observation_id FROM evidence WHERE id = ?", (ev_id,)
+        ).fetchone()
+        if ev is None or ev["origin_observation_id"] is None:
+            continue
+        obs = conn.execute(
+            "SELECT action_id FROM observations WHERE id = ?", (ev["origin_observation_id"],)
+        ).fetchone()
+        if obs is not None and obs["action_id"] == obl.origin_action_id:
+            return True
+    return False
 
 
 # ── queries (Law 17: canonical discoverability) ─────────────────────────────

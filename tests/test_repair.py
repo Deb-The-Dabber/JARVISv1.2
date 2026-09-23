@@ -166,7 +166,7 @@ class TestRepairTerminalObligationTransfer:
     def test_repair_to_terminal_transfers_obligations(self, store):
         goal, task, plan, step = make_goal_task_plan_step(store)
         task = activated(store, task, plan)
-        obl = obligations.create_obligation(store, "act_x", task.id, "r", "e")
+        obl = obligations.create_obligation(store, "act_x", task.id, "r", "e").value
         auth = repair_mod.authorize("debasish")
         r = repair_mod.repair_object(store, auth, task.id, task.revision,
                                      target_state={"status": "CANCELLED"}, reason="cancel via repair")
@@ -180,19 +180,59 @@ class TestAbandonUnrepairable:
     def test_abandoned_unrepairable_is_terminal_and_transfers(self, store):
         goal, task, plan, step = make_goal_task_plan_step(store)
         task = activated(store, task, plan)
-        obl = obligations.create_obligation(store, "act_x", task.id, "r", "e")
+        obl = obligations.create_obligation(store, "act_x", task.id, "r", "e").value
         auth = repair_mod.authorize("debasish")
-        r = repair_mod.abandon_unrepairable(store, auth, task.id, "cannot validate")
+        r = repair_mod.abandon_unrepairable(store, auth, task.id, "cannot validate",
+                                            expected_revision=task.revision)
         assert isinstance(r, Ok)
         assert r.value["obligations_transferred"] == 1
         t = work.load_task(store.read(), task.id)
         assert t.integrity.value == "ABANDONED_UNREPAIRABLE"
+        assert t.revision == task.revision + 1
         # terminal: no lifecycle mutation possible
         r2 = work.transition_object(store, task.id, TaskStatus.ACTIVE, t.revision)
         assert isinstance(r2, Rejected)
         # double-abandon rejected
-        r3 = repair_mod.abandon_unrepairable(store, auth, task.id, "again")
+        r3 = repair_mod.abandon_unrepairable(store, auth, task.id, "again",
+                                             expected_revision=t.revision)
         assert isinstance(r3, Rejected) and r3.reason == "ALREADY_ABANDONED"
+
+    def test_abandon_unrepairable_stale_revision_rejected(self, store):
+        """Law 30 CAS: two humans race the same revision — exactly one
+        abandons, the other receives STALE_REPAIR with current state."""
+        import threading
+        goal, task, plan, step = make_goal_task_plan_step(store)
+        task = activated(store, task, plan)
+        auth1 = repair_mod.authorize("human_1")
+        auth2 = repair_mod.authorize("human_2")
+        barrier = threading.Barrier(2)
+        out = {}
+
+        def run(name, auth):
+            def go():
+                barrier.wait()
+                out[name] = repair_mod.abandon_unrepairable(store, auth, task.id, "race",
+                                                             expected_revision=task.revision)
+            return go
+
+        ta = threading.Thread(target=run("a", auth1))
+        tb = threading.Thread(target=run("b", auth2))
+        ta.start(); tb.start(); ta.join(); tb.join()
+
+        oks = [r for r in out.values() if isinstance(r, Ok)]
+        losers = [r for r in out.values() if isinstance(r, Rejected)]
+        assert len(oks) == 1 and len(losers) == 1
+        assert losers[0].reason == "STALE_REPAIR"
+        assert losers[0].current is not None  # authoritative current state
+        t = work.load_task(store.read(), task.id)
+        assert t.revision == task.revision + 1  # exactly one committed transition
+        assert t.integrity.value == "ABANDONED_UNREPAIRABLE"
+        # audit shows exactly one abandon
+        n = store.read().execute(
+            "SELECT COUNT(*) n FROM audit_log WHERE object_id=? AND kind='abandoned_unrepairable'",
+            (task.id,),
+        ).fetchone()["n"]
+        assert n == 1
 
 
 class TestRecoveryNoSpecialPowers:

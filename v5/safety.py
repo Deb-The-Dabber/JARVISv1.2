@@ -56,7 +56,14 @@ def confirmation_for(store: Store, action_id: str):
 def make_confirmation_gate(required: bool):
     """Build the safety_check callable that begin_executing evaluates inside
     its transaction. `required` comes from the capability spec — the actual
-    external effect class (Law 33), not a tool name convention."""
+    external effect class (Law 33), not a tool name convention.
+
+    Law 32: the confirmation is bound to EXACT action identity, REVISION,
+    capability, and arguments. A confirmation staged at revision N is invalid
+    once the Action legitimately advances to revision N+1 — even when capability
+    and arguments are identical. Both lookup paths (the general per-action
+    lookup and the action.confirmation_id-specific lookup) enforce the same
+    four-part binding."""
     def gate(conn, action) -> Rejected | None:
         if not required:
             return None
@@ -68,6 +75,11 @@ def make_confirmation_gate(required: bool):
         if row is None:
             return Rejected(R_CONFIRMATION_REQUIRED,
                             f"capability {action.capability} requires confirmation (Law 32/33)", action)
+        if row["action_revision"] != action.revision:
+            return Rejected(R_CONFIRMATION_REQUIRED,
+                            f"confirmation was staged for revision {row['action_revision']} but the action "
+                            f"is at revision {action.revision} — a material change invalidates the "
+                            "confirmation (Law 32)", action)
         if row["capability"] != action.capability or row["arguments"] != jdump(action.arguments):
             return Rejected(R_CONFIRMATION_REQUIRED,
                             "confirmation bound to different capability/arguments (Law 32)", action)
@@ -79,6 +91,10 @@ def make_confirmation_gate(required: bool):
             if mine is None or mine["confirmed_at"] is None:
                 return Rejected(R_CONFIRMATION_REQUIRED,
                                 "action's own binding is unconfirmed (Law 32)", action)
+            if mine["action_revision"] != action.revision:
+                return Rejected(R_CONFIRMATION_REQUIRED,
+                                f"action's own binding was staged for revision {mine['action_revision']} "
+                                f"but the action is at revision {action.revision} (Law 32)", action)
             if mine["capability"] != action.capability or mine["arguments"] != jdump(action.arguments):
                 return Rejected(R_CONFIRMATION_REQUIRED,
                                 "action's binding does not match its arguments (Law 32)", action)

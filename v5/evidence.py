@@ -49,6 +49,7 @@ def _row_to_evidence(r) -> Evidence:
         acquisition_method=r["acquisition_method"], source=r["source"],
         relevance_to=r["relevance_to"], timestamp=r["timestamp"],
         content=jload(r["content"]),
+        origin_observation_id=r["origin_observation_id"] if "origin_observation_id" in r.keys() else None,
     )
 
 
@@ -92,17 +93,18 @@ def load_verification(store: Store, verification_id: str) -> Verification | None
 # ── Evidence creation ────────────────────────────────────────────────────────
 
 def _insert_evidence(conn, status: EvidenceStatus, acquisition_method: str,
-                     source: str, relevance_to: str, content) -> Evidence:
+                     source: str, relevance_to: str, content,
+                     origin_observation_id: str | None = None) -> Evidence:
     ev = Evidence(
         id=new_id("evidence"), status=status, acquisition_method=acquisition_method,
         source=source, relevance_to=relevance_to, timestamp=iso(utcnow()),
-        content=content,
+        content=content, origin_observation_id=origin_observation_id,
     )
     conn.execute(
-        "INSERT INTO evidence (id, status, acquisition_method, source, relevance_to, timestamp, content) "
-        "VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO evidence (id, status, acquisition_method, source, relevance_to, timestamp, content, origin_observation_id) "
+        "VALUES (?,?,?,?,?,?,?,?)",
         (ev.id, status.value, acquisition_method, source, relevance_to,
-         ev.timestamp, jdump(content)),
+         ev.timestamp, jdump(content), origin_observation_id),
     )
     return ev
 
@@ -123,6 +125,9 @@ def record_runtime_evidence(store: Store, observation_id: str, source: str,
             conn, EvidenceStatus.CONFIRMED_RUNTIME,
             acquisition_method="capability_execution", source=source,
             relevance_to=relevance_to, content=content,
+            origin_observation_id=observation_id,  # Law 23 provenance — this is
+            # the link obligation resolution walks to prove the chain
+            # Obligation→Action→Observation→Evidence.
         )
         store.audit(conn, ev.id, "evidence_recorded", None, EvidenceStatus.CONFIRMED_RUNTIME.value)
         return Ok(ev)

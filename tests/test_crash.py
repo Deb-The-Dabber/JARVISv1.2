@@ -261,8 +261,8 @@ class TestCrash8CompleteObjectTransferAtomicity:
         goal, task, plan, step = make_goal_task_plan_step(store)
         task = activated(store, task, plan)
         # two OPEN obligations owned by the task
-        o1 = obligations.create_obligation(store, "act_1", task.id, "r1", "e1")
-        o2 = obligations.create_obligation(store, "act_2", task.id, "r2", "e2")
+        o1 = obligations.create_obligation(store, "act_1", task.id, "r1", "e1").value
+        o2 = obligations.create_obligation(store, "act_2", task.id, "r2", "e2").value
         # make the step complete so the policy is satisfied
         sr = work.transition_object(store, step.id, work.StepStatus.READY, step.revision)
         step = sr.value

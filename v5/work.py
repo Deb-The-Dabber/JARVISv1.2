@@ -654,22 +654,33 @@ def complete_step(store: Store, step_id: str, expected_revision: int) -> Result:
 # ── integrity freeze (Law 5) for Work-owned objects ──────────────────────────
 
 def freeze_object(store: Store, obj_id: str, reason: str) -> Result:
-    """Law 5 integrity freeze for goals/tasks/plans/steps: no autonomous
-    mutation until repair. Both conflicting representations are preserved
-    verbatim — nothing is merged or deleted here."""
+    """Law 5 integrity freeze for goals/tasks: no autonomous mutation until
+    repair. Both conflicting representations are preserved verbatim — nothing
+    is merged or deleted here.
+
+    Type gate: only Goal/Task carry an `integrity` column per the contracted
+    schema. Plans/Steps do not — the freeze concept does not exist for them in
+    the Contract (their lifecycle is governed by status transitions and Plan
+    supersession). Freezing them here would attempt to set a non-existent
+    column (latent SQL error); they are rejected explicitly instead. Idempotent:
+    an object already FROZEN returns Ok without another mutation/audit entry."""
     with store.write() as conn:
         obj, kind = _load_object(conn, obj_id)
         if obj is None:
             return Rejected(R_NOT_FOUND, obj_id, None)
-        if kind in ("goal", "task", "plan", "step"):
-            table = {"goal": "goals", "task": "tasks", "plan": "plans", "step": "steps"}[kind]
-            conn.execute(
-                f"UPDATE {table} SET integrity = 'FROZEN', revision = revision + 1 WHERE id = ?",
-                (obj_id,),
-            )
-            store.audit(conn, obj_id, "integrity_frozen", obj.status.value, None, reason=reason)
-            return Ok(_load_object(conn, obj_id)[0])
-        return Rejected(R_INVALID_TRANSITION, f"freeze supports Work objects, got {kind}", obj)
+        if kind not in ("goal", "task"):
+            return Rejected(R_INVALID_TRANSITION,
+                            f"Law 5 freeze applies to integrity-bearing goal/task, got {kind}", obj)
+        if obj.integrity.value == "FROZEN":
+            return Ok({"frozen": obj_id, "idempotent": True})
+        table = {"goal": "goals", "task": "tasks"}[kind]
+        conn.execute(
+            f"UPDATE {table} SET integrity = 'FROZEN', revision = revision + 1 "
+            "WHERE id = ? AND revision = ?",
+            (obj_id, obj.revision),
+        )
+        store.audit(conn, obj_id, "integrity_frozen", obj.status.value, None, reason=reason)
+        return Ok(_load_object(conn, obj_id)[0])
 
 
 def _load_object(conn, obj_id: str):

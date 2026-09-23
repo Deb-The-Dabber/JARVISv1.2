@@ -228,6 +228,131 @@ prior versions are preserved verbatim.
 
 **Test**: `test_invariants.py` (Law 24 structural) + E2E.
 
+## 18. Law 29/30 — repair cannot fabricate PASS verifications (2026-09 hardening)
+
+**Decision**: A Verification `result` may reach PASS *only* through the
+normal evaluation path (`run_verification`). Repair rejects any target of
+`result: PASS` when the current result is not already PASS:
+- PENDING → no evaluation ever ran; nothing substantiates PASS.
+- RUNNING → evaluation began but its outcome was never persisted (crash #6);
+  a human's belief that it passed is INFERENCE-typed inference and may not be
+  recorded as a persisted outcome. The sanctioned recovery is to re-run the
+  verification (`run_verification` accepts RUNNING state).
+- FAIL / INCONCLUSIVE → a persisted outcome exists; rewriting it violates
+  evidence immutability.
+
+PASS → PASS is permitted only as a no-op (idempotent repair that changes
+nothing). The rejection is audited with the human's identity ("repaired")
+exactly like any other repair decision.
+
+**Test**: `tests/test_hardening.py::TestVerificationRepairFabrication` (four rejection states + normal-execution and no-op controls).
+
+## 19. Laws 17/18 — obligation owner validation at creation AND transfer
+
+**Decision**: `create_obligation` validates, inside its single commit
+transaction, that `owner` is the UOR sentinel or a row that currently exists
+in `tasks`. A rejected creation returns `Rejected` and writes nothing (no
+orphan obligation rows can exist, even after a crash between validation and
+insert — validation and insert share one atomic boundary). `_transfer_locked`
+enforces the identical rule for `new_owner`, so Law 20's terminal-transition
+transfers can never detach an obligation to a non-canonical owner.
+
+`mark_unknown_outcome` (Execution Service) is not a bypass because its owner
+is *derived* from the canonical step→plan→task chain inside the same
+transaction — it is never caller-supplied.
+
+**Test**: `tests/test_hardening.py::TestObligationOwnerValidation` (ghost owner, ghost transfer, UOR + real-task accepted, no-orphan-row assertion).
+
+## 20. Laws 23/25/29 — obligation resolution requires provenance, not just a PASS
+
+**Decision**: `resolve_obligation` requires (1) the supplied Verification
+exists and is PASS, and (2) the verification's claim cites at least one
+runtime Evidence whose `origin_observation_id` walks back to an Observation
+of the obligation's `origin_action_id`. INFERENCE/UNKNOWN-typed evidence
+carries no observation and cannot establish the link — an LLM's belief that
+"it worked" is not proof about the originating action.
+
+Canonical chain: `Obligation.origin_action_id` → `Observation.action_id` →
+`Evidence.origin_observation_id` → `Claim.based_on` → `Verification`.
+
+**Semantic limit (boundary documented, not a redesign)**: provenance +
+PASS proves the verification *concerns the originating action*. It does not
+prove the claim's natural-language content addresses the obligation's
+specific `unknown_reason`/`possible_external_effect`. Content relevance is
+not machine-checkable at the SQL layer; it is carried by the Claim/Verification
+quality model (method, independence_level) and the human in the loop ratifying
+or rejecting the obligation resolution. This pass does not invent content
+semantics.
+
+**Test**: `tests/test_hardening.py::TestObligationResolutionProvenance` (valid chain resolves; unrelated Action B's PASS rejected; inference-only PASS rejected).
+
+## 21. Law 32 — confirmation binds to exact Action revision
+
+**Decision**: `create_confirmation` already recorded `action_revision`; the
+hardening was at the *gate*: both lookup paths (`make_confirmation_gate`'s
+general per-action lookup AND the action-specific `confirmation_id` path)
+now reject when `confirmation.action_revision != action.revision`. A material
+change that legitimately advances revision (e.g. a repair setting
+`confirmation_id` or any revision-bumping transition) invalidates the staged
+confirmation even with identical capability/arguments. A fresh confirmation
+at the new revision is the only way forward.
+
+**Test**: `tests/test_hardening.py::TestConfirmationRevisionBinding` (both paths reject after revision advance; control: current-revision and restaged confirmations pass).
+
+## 22. IntegrityStatus scope — goal/task/action only
+
+**Decision** (resolves the frozen schema vs. the Law 5 freeze verb): the
+contracted schema grants an `integrity` column only to Goal and Task (we
+added it to Action as a documented storage addition for Law 5 execution-
+freeze — see foundation DECISIONS). Plans, Steps, Verifications, Obligations
+do not carry IntegrityStatus as storage. Consequently:
+- `_REPAIRABLE_FIELDS` offers `integrity` only on goal/task/action. Granting
+  it on the column-less types produced a latent `no such column` SQL error
+  at commit time — a genuine defect now closed (schema-truthful whitelist).
+- `work.freeze_object` accepts goal/task only (plan/step are rejected with
+  INVALID_TRANSITION; execution freezes go through
+  `execution.freeze_action`). Freeze is idempotent (re-freezing returns Ok).
+- `repair.abandon_unrepairable` accepts goal/task/action only. Plans/Steps
+  reach terminal integrity through status transitions (supersede/cancel/fail),
+  not through an integrity settlement.
+
+Law 5's *principle* (frozen things don't mutate) is preserved for the types
+that carry integrity; the *verb* is now schema-truthful.
+
+**Test**: `tests/test_hardening.py::TestRepairSchemaTruthful`, `TestFreezeObjectTypeGate`, `TestAbandonTypeGate`.
+
+## 23. Law 13 — committed plan.dependency_graph is the sole canonical graph
+
+**Decision**: `Step.depends_on` is a denormalized read-copy kept in sync by
+`add_dependency` (same transaction, checked against the as-committed graph).
+It is **not** independently repairable (removed from `_REPAIRABLE_FIELDS`)
+because repairing the copy would diverge the two Law 13 representations.
+Repairs target the canonical `plan.dependency_graph` and are aggregate-
+validated with the same `_has_cycle` check the normal path enforces —
+self-dependencies and cycles are rejected; after commit, `add_dependency`
+re-syncs the step copies from the repaired graph on its next write.
+
+(The trigger in Phase 4 was discovering that repairing the denormalized copy
+was possible while cycle-checks only guarded the normal add path.)
+
+**Test**: `tests/test_hardening.py::TestDependencyGraphRepairDiscipline` (`depends_on` repair forbidden; cyclic graph repair rejected; acyclic repair allowed—additive cycle check reused).
+
+## 24. Schema migration mechanism (2026-09; evidence.origin_observation_id)
+
+**Decision**: `Store` tracks schema versions via SQLite's native
+`PRAGMA user_version` (no separate framework, no extra tables). Migrations
+are strictly additive (`ALTER TABLE ... ADD COLUMN`), idempotent
+(`PRAGMA table_info` guard), and atomically bounded in a normal write
+transaction. Current version is 2: v2 adds `evidence.origin_observation_id`
+(Fix 6/20 provenance column). A v1 database with pre-existing rows upgrades
+safely: the column is added, no rows are touched, `user_version` advances.
+
+This exists because `CREATE TABLE IF NOT EXISTS` cannot add a column to an
+already-opened production database. It is the smallest mechanism that does
+the job.
+
+**Test**: `tests/test_hardening.py::TestRuntimeEvidenceProvenance::test_schema_migration_adds_column_and_preserves_rows` + `::test_migration_is_idempotent`.
+
 ---
 
 ## Laws not mechanically testable at this stage (with reasons)
