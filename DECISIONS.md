@@ -247,8 +247,39 @@ exactly like any other repair decision.
 
 **Test**: `tests/test_hardening.py::TestVerificationRepairFabrication` (four rejection states + normal-execution and no-op controls).
 
-## 19. Laws 17/18 — obligation owner validation at creation AND transfer
+### 18a. Ratification record (post-hoc approval — process gap closed)
 
+**Status**: APPROVED AS-IS by the owner (retroactive ratification).
+
+**Process gap — logged accurately, not reworded**: the interpretation in
+#18 was implemented in `f10399e` **before** the pre-merge human sign-off the
+prior brief required for Law 29/30 questions ("APPROVAL CHECKPOINT"). The
+approval checkpoint was not followed in order; the code shipped, then the
+owner reviewed and ratified the already-committed interpretation afterwards.
+None of this entry pretends the checkpoint was followed. The gap is closed
+by this record.
+
+**The ratified rule**: `run_verification` is the only path to `PASS`. Repair
+may never write `PASS` to a verification whose persisted result is not
+already PASS, in any prior state — `PENDING`, `RUNNING`, `FAIL`, or
+`INCONCLUSIVE`.
+
+**Accepted consequence** (explicitly reviewed and accepted): if an
+evaluation genuinely ran and crashed before its outcome was persisted
+(verification stuck `RUNNING`), even a human holding rich evidence that it
+passed cannot repair it to `PASS`. The sanctioned recovery is to re-run the
+verification through `run_verification`, which accepts `RUNNING` state.
+That re-run — not repair — is the only way PASS enters the ledger.
+
+**Scope confirmation**: the rejection is provably narrow — it fires on
+target-state `PASS` only. Repairs that set `PENDING`/`RUNNING` → `FAIL` or
+`→ INCONCLUSIVE` remain legal: those are corrective "this did not complete /
+we don't know" assertions (the honest opposite of fabricated success), not
+Law 29 violations. Regression tests:
+`tests/test_hardening.py::TestVerificationRepairFabrication::test_running_to_fail_allowed`
+and `::test_running_to_inconclusive_allowed`.
+
+## 19. Laws 17/18 — obligation owner validation at creation AND transfer
 **Decision**: `create_obligation` validates, inside its single commit
 transaction, that `owner` is the UOR sentinel or a row that currently exists
 in `tasks`. A rejected creation returns `Rejected` and writes nothing (no

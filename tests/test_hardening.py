@@ -196,6 +196,35 @@ class TestVerificationRepairFabrication:
                                      target_state={"result": "PASS"}, reason="no-op confirmation")
         assert isinstance(r, Ok), r
 
+    def test_running_to_fail_allowed(self, store):
+        """Corrective 'this didn't complete' assertion: RUNNING -> FAIL is NOT
+        fabrication (it claims failure, not success) and must not be swept up
+        in the PASS-only rejection."""
+        goal, task, plan, step = make_goal_task_plan_step(store)
+        ver = self._make_claim_and_ver(store, task)
+        with store.write() as conn:
+            conn.execute("UPDATE verifications SET result = 'RUNNING' WHERE id = ?", (ver.id,))
+        auth = repair_mod.authorize("debasish")
+        r = repair_mod.repair_object(store, auth, ver.id, 0,
+                                     target_state={"result": "FAIL"},
+                                     reason="evaluation never persisted an outcome (crash #6)")
+        assert isinstance(r, Ok), r
+        assert evidence.load_verification(store, ver.id).result.value == "FAIL"
+
+    def test_running_to_inconclusive_allowed(self, store):
+        """Same for RUNNING -> INCONCLUSIVE: asserting 'we genuinely don't
+        know' is the honest opposite of manufacturing PASS."""
+        goal, task, plan, step = make_goal_task_plan_step(store)
+        ver = self._make_claim_and_ver(store, task)
+        with store.write() as conn:
+            conn.execute("UPDATE verifications SET result = 'RUNNING' WHERE id = ?", (ver.id,))
+        auth = repair_mod.authorize("debasish")
+        r = repair_mod.repair_object(store, auth, ver.id, 0,
+                                     target_state={"result": "INCONCLUSIVE"},
+                                     reason="outcome unknown after crash")
+        assert isinstance(r, Ok), r
+        assert evidence.load_verification(store, ver.id).result.value == "INCONCLUSIVE"
+
 
 # ── Fix 3: obligation resolution provenance (Laws 23/25/29) ──────────────────
 
