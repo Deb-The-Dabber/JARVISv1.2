@@ -82,13 +82,49 @@ def observation_count(store: Store, action_id: str) -> int:
 
 def create_action(store: Store, step_id: str, capability: str, arguments: dict,
                   idempotency_class: IdempotencyClass,
-                  confirmation_id: str | None = None) -> Result:
+                  confirmation_id: str | None = None,
+                  expected_step_revision: int | None = None) -> Result:
+    """Persist Action(PENDING). This is the authoritative Action-acceptance
+    path — Cognition reaches it only through propose_action, which may not
+    execute anything (Impl. Contract §12).
+
+    Authoritative checks added for the Cognition membrane (all evaluated
+    inside the same transaction, none of them replacing the adapter's
+    fast-fail layer):
+      * expected_step_revision CAS, when supplied (§12.1 stale-step guard);
+      * capability correspondence: if the Step declares a canonical
+        execution_capability (Cognition-created steps always do), the Action's
+        capability must equal it exactly (§12.2/§29) — the adapter is never
+        the sole enforcement mechanism;
+      * registry schema validation: a capability with a declared
+        validate_args schema must have schema-valid arguments before the
+        Action is accepted (§12.1/§42).
+
+    Legacy foundation rows (steps with execution_capability = "") are not
+    retro-constrained — the correspondence check applies only where a
+    capability was canonically declared."""
     with store.write() as conn:
         step_row = conn.execute("SELECT * FROM steps WHERE id = ?", (step_id,)).fetchone()
         if step_row is None:
             return Rejected(R_NOT_FOUND, f"step {step_id}", None)
         if step_row["status"] in ("CANCELLED", "SKIPPED", "COMPLETED"):
             return Rejected(R_INVALID_TRANSITION, f"step status {step_row['status']} (Law 14)", None)
+        if expected_step_revision is not None and step_row["revision"] != expected_step_revision:
+            return Rejected(R_STALE_REVISION,
+                            f"step revision={step_row['revision']} expected={expected_step_revision}",
+                            None)
+        declared = step_row["execution_capability"] if "execution_capability" in step_row.keys() else ""
+        if declared and capability != declared:
+            return Rejected(R_INVALID_TRANSITION,
+                            f"action capability {capability!r} does not match the step's declared "
+                            f"execution_capability {declared!r} (§12.2/§29 correspondence)", None)
+        from v5 import capabilities as _caps
+        spec = _caps.get(capability)
+        if spec is not None and spec.validate_args is not None:
+            schema_err = spec.validate_args(arguments)
+            if schema_err is not None:
+                return Rejected("CAPABILITY_ARGS_INVALID",
+                                f"{capability}: {schema_err}", None)
         a = Action(
             id=new_id("action"), revision=0, step_id=step_id, status=ActionStatus.PENDING,
             capability=capability, arguments=dict(arguments),

@@ -51,7 +51,16 @@ CREATE TABLE IF NOT EXISTS steps (
     plan_id TEXT NOT NULL,
     status TEXT NOT NULL,
     required INTEGER NOT NULL,
-    depends_on TEXT NOT NULL DEFAULT '[]'
+    depends_on TEXT NOT NULL DEFAULT '[]',
+    description TEXT NOT NULL DEFAULT '',
+    execution_capability TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    state TEXT NOT NULL,
+    cognition_authorized INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    terminated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS actions (
     id TEXT PRIMARY KEY,
@@ -200,7 +209,7 @@ class Store:
     # SQLite-native versioning via PRAGMA user_version. Additive upgrades only
     # (ALTER TABLE ... ADD COLUMN). Never destructive. Nothing here invents a
     # framework; each step is idempotent and transaction-bounded.
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def _apply_migrations(self):
         current = self._conn.execute("PRAGMA user_version").fetchone()[0]
@@ -212,6 +221,17 @@ class Store:
                 cols = [r[1] for r in conn.execute("PRAGMA table_info(evidence)").fetchall()]
                 if "origin_observation_id" not in cols:
                     conn.execute("ALTER TABLE evidence ADD COLUMN origin_observation_id TEXT")
+            # v3: Cognition Implementation Contract v1.1 — sessions (the Session
+            # authority, §13) and canonical Step data the contract requires:
+            # description + execution_capability (§11.4). Fresh databases reach
+            # these via _SCHEMA's CREATE TABLE IF NOT EXISTS statements above;
+            # the ALTERs here bring forward databases created at v1/v2.
+            if current < 3:
+                cols = [r[1] for r in conn.execute("PRAGMA table_info(steps)").fetchall()]
+                if "description" not in cols:
+                    conn.execute("ALTER TABLE steps ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+                if "execution_capability" not in cols:
+                    conn.execute("ALTER TABLE steps ADD COLUMN execution_capability TEXT NOT NULL DEFAULT ''")
             conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
 
     def close(self):

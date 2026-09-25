@@ -10,4 +10,5 @@ dev = ["pytest>=8"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]  # flat layout: the v5 package lives at repo root; pytest>=7 officially supports this
 addopts = "-q"

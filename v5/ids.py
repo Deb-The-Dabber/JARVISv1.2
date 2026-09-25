@@ -50,6 +50,7 @@ _PREFIXES = {
     "verification": "ver_",
     "obligation": "obl_",
     "confirmation": "cfm_",
+    "session": "sess_",
 }
 
 

@@ -105,6 +105,14 @@ class IntegrityStatus(Enum):
     ABANDONED_UNREPAIRABLE = "ABANDONED_UNREPAIRABLE"
 
 
+class SessionState(Enum):
+    """Cognition Implementation Contract §13.2 — session legitimacy is a
+    property of the session, never of any Work object it touches."""
+
+    LIVE = "LIVE"
+    TERMINATED = "TERMINATED"
+
+
 # ── Explicit transition tables (Law 34: no implicit transitions) ─────────────
 # Nothing is permitted merely because it isn't prohibited. These tables ARE the
 # transition contract for each lifecycle. Terminal states never reopen (Law 14).

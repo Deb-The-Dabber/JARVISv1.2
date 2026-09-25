@@ -191,20 +191,30 @@ def _confidence_justified(conn, based_on: list[str], confidence: ClaimConfidence
 def create_claim(store: Store, asserts: str, based_on: list[str],
                  made_by: str, confidence: ClaimConfidence) -> Result:
     with store.write() as conn:
-        for ref in based_on:
-            if conn.execute("SELECT 1 FROM evidence WHERE id = ?", (ref,)).fetchone() is None:
-                return Rejected(R_NOT_FOUND, f"cited evidence {ref} not found", None)
-        if not _confidence_justified(conn, based_on, confidence):
-            return Rejected(R_CONFIDENCE,
-                            "HIGH confidence requires at least one CONFIRMED_* evidence (Law 27)", None)
-        claim_id = new_id("claim")
-        conn.execute(
-            "INSERT INTO claims (id, version, asserts, based_on, confidence, made_by) VALUES (?,?,?,?,?,?)",
-            (claim_id, 1, asserts, jdump(based_on), confidence.value, made_by),
-        )
-        store.audit(conn, claim_id, "claim_created", None, confidence.value)
-        return Ok(Claim(id=claim_id, version=1, asserts=asserts, based_on=based_on,
-                        confidence=confidence, made_by=made_by))
+        return _create_claim_locked(store, conn, asserts, based_on, made_by, confidence)
+
+
+def _create_claim_locked(store: Store, conn, asserts: str, based_on: list[str],
+                         made_by: str, confidence: ClaimConfidence) -> Result:
+    """create_claim's validation+insert+audit, expressed against an already-
+    open write transaction. The public wrapper and this core share the exact
+    same checks; Work Service's atomic plan acceptance composes this inside
+    its own transaction (no partial proposal state, no parallel authority —
+    the checks are the same code)."""
+    for ref in based_on:
+        if conn.execute("SELECT 1 FROM evidence WHERE id = ?", (ref,)).fetchone() is None:
+            return Rejected(R_NOT_FOUND, f"cited evidence {ref} not found", None)
+    if not _confidence_justified(conn, based_on, confidence):
+        return Rejected(R_CONFIDENCE,
+                        "HIGH confidence requires at least one CONFIRMED_* evidence (Law 27)", None)
+    claim_id = new_id("claim")
+    conn.execute(
+        "INSERT INTO claims (id, version, asserts, based_on, confidence, made_by) VALUES (?,?,?,?,?,?)",
+        (claim_id, 1, asserts, jdump(based_on), confidence.value, made_by),
+    )
+    store.audit(conn, claim_id, "claim_created", None, confidence.value)
+    return Ok(Claim(id=claim_id, version=1, asserts=asserts, based_on=based_on,
+                    confidence=confidence, made_by=made_by))
 
 
 def revise_claim(store: Store, claim_id: str, asserts: str, based_on: list[str],
@@ -256,20 +266,32 @@ def create_verification(store: Store, verifies_claim_id: str, method: str,
     ):
         return Rejected("INVALID_INDEPENDENCE", f"independence_level {independence_level}", None)
     with store.write() as conn:
-        if conn.execute("SELECT 1 FROM claims WHERE id = ?", (verifies_claim_id,)).fetchone() is None:
-            return Rejected(R_NOT_FOUND, f"claim {verifies_claim_id} not found", None)
-        v = Verification(
-            id=new_id("verification"), verifies=verifies_claim_id, method=method,
-            independence_level=independence_level, result=VerificationResult.PENDING,
-            timestamp=iso(utcnow()),
-        )
-        conn.execute(
-            "INSERT INTO verifications (id, verifies, method, independence_level, result, timestamp) "
-            "VALUES (?,?,?,?,?,?)",
-            (v.id, v.verifies, v.method, v.independence_level, v.result.value, v.timestamp),
-        )
-        store.audit(conn, v.id, "verification_created", None, VerificationResult.PENDING.value)
-        return Ok(v)
+        return _create_verification_locked(store, conn, verifies_claim_id, method, independence_level)
+
+
+def _create_verification_locked(store: Store, conn, verifies_claim_id: str,
+                                method: str, independence_level: str) -> Result:
+    """create_verification's checks+insert+audit against an open write
+    transaction (composed by Work Service's atomic plan acceptance)."""
+    if independence_level not in (
+        "deterministic", "direct_observation", "independent_capability",
+        "derived_computation", "llm_evaluation", "self_report",
+    ):
+        return Rejected("INVALID_INDEPENDENCE", f"independence_level {independence_level}", None)
+    if conn.execute("SELECT 1 FROM claims WHERE id = ?", (verifies_claim_id,)).fetchone() is None:
+        return Rejected(R_NOT_FOUND, f"claim {verifies_claim_id} not found", None)
+    v = Verification(
+        id=new_id("verification"), verifies=verifies_claim_id, method=method,
+        independence_level=independence_level, result=VerificationResult.PENDING,
+        timestamp=iso(utcnow()),
+    )
+    conn.execute(
+        "INSERT INTO verifications (id, verifies, method, independence_level, result, timestamp) "
+        "VALUES (?,?,?,?,?,?)",
+        (v.id, v.verifies, v.method, v.independence_level, v.result.value, v.timestamp),
+    )
+    store.audit(conn, v.id, "verification_created", None, VerificationResult.PENDING.value)
+    return Ok(v)
 
 
 def run_verification(store: Store, verification_id: str, evaluator) -> Result:

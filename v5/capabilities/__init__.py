@@ -20,6 +20,13 @@ class CapabilitySpec:
     idempotency_class: IdempotencyClass
     requires_confirmation: bool
     execute: Callable[[dict], dict]
+    # Cognition Implementation Contract v1.1 §12.1/§42: the declared argument
+    # schema. Called by proposal validation (fast-fail) AND by the execution
+    # authority before an Action is accepted (authoritative). Returns an error
+    # string describing the first violation, or None when the arguments are
+    # schema-valid. None = "no schema declared" (pre-Contract rows/capabilities
+    # keep existing behavior).
+    validate_args: Callable[[dict], str | None] | None = None
 
 
 class DefiniteNoEffect(Exception):
@@ -45,6 +52,32 @@ def get(name: str) -> CapabilitySpec | None:
 
 
 # ── file_write ───────────────────────────────────────────────────────────────
+
+def _file_write_validate_args(args: dict) -> str | None:
+    """Declared argument schema for file_write (§42). Runs BEFORE persistence —
+    at Cognition proposal time and at Action acceptance — never only at effect
+    time. Bounds here are the capability's own contract; the Cognition-layer
+    bounds (collection sizes/depth) are enforced separately."""
+    if not isinstance(args, dict):
+        return "arguments must be an object"
+    allowed = {"path", "content"}
+    unknown = sorted(set(args) - allowed)
+    if unknown:
+        return f"unknown argument field(s): {', '.join(unknown)}"
+    path = args.get("path")
+    if path is None:
+        return "path is required"
+    if not isinstance(path, str) or not path.strip():
+        return "path must be a non-empty string"
+    if len(path) > 4096:
+        return "path exceeds 4096 chars"
+    content = args.get("content")
+    if content is not None and not isinstance(content, str):
+        return "content must be a string"
+    if isinstance(content, str) and len(content) > 1024 * 1024:
+        return "content exceeds 1MiB"
+    return None
+
 
 def _file_write(args: dict) -> dict:
     path = args.get("path")
@@ -78,6 +111,7 @@ register(CapabilitySpec(
     idempotency_class=IdempotencyClass.IDEMPOTENT,  # same content -> same result
     requires_confirmation=True,                        # external filesystem effect
     execute=_file_write,
+    validate_args=_file_write_validate_args,
 ))
 
 

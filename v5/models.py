@@ -86,6 +86,12 @@ class Step:
     status: StepStatus
     required: bool                     # requiredness is Work's to set
     depends_on: set[str]
+    # Cognition Implementation Contract v1.1 §11.4: the step's declared
+    # execution capability is canonical Step data once the Plan is committed.
+    # "" on foundation-created rows = unconstrained (pre-Cognition behavior
+    # preserved; the Cognition path always declares one explicitly).
+    description: str = ""
+    execution_capability: str = ""
 
 
 @dataclass
@@ -215,3 +221,6 @@ R_INTEGRITY_TERMINAL = "INTEGRITY_TERMINAL"
 R_TERMINAL = "ALREADY_TERMINAL"
 R_CONFIDENCE = "CONFIDENCE_NOT_JUSTIFIED"
 R_EVIDENCE_STATUS = "EVIDENCE_STATUS_FORBIDDEN"
+# Cognition Implementation Contract v1.1 §7/§13.3
+R_MALFORMED_PROPOSAL = "MALFORMED_PROPOSAL"
+R_UNAUTHORIZED = "UNAUTHORIZED"

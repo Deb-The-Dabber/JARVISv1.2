@@ -437,3 +437,71 @@ terminally-abandoned object can no longer transition (parity with
 - **Law 17 "eligible for the system's normal attention mechanism"** —
   discoverability is tested (`list_open_obligations`); the attention
   mechanism itself is a cognition-layer concern.
+
+## 26. Cognition Implementation Contract v1.1 — membrane implementation (2026-09-25)
+
+### New modules added (the only ones the contract authorizes)
+- `v5/cognition.py` — the four frozen `propose_*` functions, the
+  `AuthenticatedCognitionContext` (internal plumbing, §13.2), the
+  model-output adapter (§18–§26), and all bound constants (§8).
+- `v5/sessions.py` — the Session authority the contract references (§13):
+  ephemeral session lifecycle + single deployment `OWNER_PRINCIPAL_ID`
+  (env-overridable — it is config, not state).
+- `v5/verification.py` — the verification-method registry (§28):
+  `verify_file_write` is registered with an evaluator that reads the
+  filesystem independently (§34/§35).
+
+### Reused, not duplicated
+State Foundation (store/transactions/CAS), Work Service (create_*,
+activate_plan, complete_object, bind_required_verification), Execution
+(create_action, begin_executing, mark_observed, mark_unknown_outcome,
+mark_failed), capabilities registry (registered `file_write` with declared
+`validate_args` schema), evidence/claim/verification paths, confirmation
+gate, obligations, repair. No second store, lifecycle, planner, verifier, or
+capability system was created.
+
+### Interpretations recorded
+- **propose_goal sets context.** propose_goal takes `session_id` in its
+  frozen signature; the other three take an object id + expected revision.
+  `principal_id` is resolved once at authentication from deployment config
+  (§13.1), threaded via `contextvars`, and read back against the Session
+  authority on every call. `authenticate_session` failure clears any stale
+  threaded context — a swap attempt must never leave the old authorization
+  active. This is the contract's "however that context is threaded through
+  the calling code" mechanism.
+- **Bounds values (§8).** Step description = 500 (pinned by Interface §4).
+  Others are implementation-defined; conservative choices:
+  goal/task statement 2000, plan steps 20, per-step dependencies 20,
+  verification requirements 8, capability args 32 keys/64KiB/depth 8.
+- **`Step.execution_capability` is canonical.** Column `steps.execution_capability`
+  is "" on legacy foundation-created steps (pre-Cognition steps are
+  unconstrained — existing Foundation behavior is untouched), and required on
+  any Cognition-proposed step. Both propose_action and `execution.create_action`
+  enforce correspondence independently (§12.2).
+- **Plan acceptance is one commit.** `work.create_plan_with_steps` creates
+  Plan+Steps+claims+verifications+bindings in ONE transaction (§50). It
+  composes the foundation's `_create_claim_locked`/_create_verification_locked/
+  `_bind_required_verification_locked` cores rather than duplicating them;
+  those cores were extracted without changing their public-wrapper behavior.
+- **Verification binding happens at plan commit (§27).** Work Service binds
+  declared verification requirements to the Task. Cognition only exposes
+  `VerificationRequirement` data on StepProposal; it never calls any binding
+  function.
+- **Adapter dedupe is same-emission only** (§26): content-hash equality of the
+  full parsed payload within one `parse_proposals` call. Cross-emission
+  repeats are legitimate new proposals (proved by test_cross_emission_repeat).
+- **Asked §44's "direct Cognition attempt to mutate State Foundation tables /
+  invoke a capability"**: enforced by construction — v5/cognition.py contains
+  no store.write/conn.execute/capability.execute call and no repair import;
+  plus a structural test asserts that (test_cognition_module_never_opens_write_transactions).
+
+### Adversarial-audit result (v1.1 scope, §10 checklist)
+Cognition cannot mutate canonical state (no write surface); cannot fabricate
+IDs (NOT_FOUND, never guessed); cannot execute capabilities (capability never
+called by propose_action — instrumented test); cannot fabricate Observ/
+Verification PASS (verification is filesystem-grounded; repair can't write
+PASS — regression); session termination cannot strand Work (§13.4 payoff
+test passes); session_origin is inert under direct corruption (test proves
+it); principal_id never reaches the schema (schema test); duplicate
+proposals cannot create duplicates (same-emission dedupe; cross-emission is
+by design); no parallel authority exists (structural import-grep test).

@@ -36,6 +36,7 @@ from v5.models import (
     Step,
     Task,
     R_COMPLETION_POLICY,
+    R_DEPENDENCY_CYCLE,
     R_FROZEN,
     R_INVALID_TRANSITION,
     R_NOT_FOUND,
@@ -113,6 +114,8 @@ def load_step(conn, step_id: str) -> Step | None:
         id=r["id"], revision=r["revision"], plan_id=r["plan_id"],
         status=StepStatus(r["status"]), required=bool(r["required"]),
         depends_on=set(jload(r["depends_on"], [])),
+        description=r["description"] if "description" in r.keys() else "",
+        execution_capability=(r["execution_capability"] if "execution_capability" in r.keys() else ""),
     )
 
 
@@ -164,11 +167,15 @@ def create_goal(store: Store, completion_policy: CompletionPolicy,
 
 
 def create_task(store: Store, goal_id: str, completion_policy: CompletionPolicy,
-                retry_budget: RetryBudget | None = None) -> Result:
+                retry_budget: RetryBudget | None = None,
+                expected_goal_revision: int | None = None) -> Result:
     with store.write() as conn:
         goal = load_goal(conn, goal_id)
         if goal is None:
             return Rejected(R_NOT_FOUND, f"goal {goal_id}", None)
+        if expected_goal_revision is not None and goal.revision != expected_goal_revision:
+            return Rejected(R_STALE_REVISION,
+                            f"goal revision={goal.revision} expected={expected_goal_revision}", goal)
         if goal.status in GOAL_TERMINAL:
             return Rejected(R_TERMINAL, f"goal {goal.status.value} — new work needs new identity (Law 14)", goal)
         budget = retry_budget or RetryBudget(max_attempts=3)
@@ -210,7 +217,9 @@ def create_plan(store: Store, task_id: str) -> Result:
 
 
 def create_step(store: Store, plan_id: str, required: bool,
-                depends_on: set[str] | None = None) -> Result:
+                depends_on: set[str] | None = None,
+                description: str = "",
+                execution_capability: str = "") -> Result:
     depends_on = set(depends_on or ())
     with store.write() as conn:
         plan = load_plan(conn, plan_id)
@@ -221,14 +230,17 @@ def create_step(store: Store, plan_id: str, required: bool,
         s = Step(
             id=new_id("step"), revision=0, plan_id=plan_id, status=StepStatus.PENDING,
             required=required, depends_on=depends_on,
+            description=description, execution_capability=execution_capability,
         )
         graph = dict(plan.dependency_graph)
         graph[s.id] = set(depends_on)
         if _has_cycle(graph):
             return Rejected("DEPENDENCY_CYCLE", "step depends_on would create a cycle (Law 13)", plan)
         conn.execute(
-            "INSERT INTO steps (id, revision, plan_id, status, required, depends_on) VALUES (?,?,?,?,?,?)",
-            (s.id, 0, plan_id, s.status.value, 1 if required else 0, jdump(sorted(depends_on))),
+            "INSERT INTO steps (id, revision, plan_id, status, required, depends_on, description, execution_capability) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (s.id, 0, plan_id, s.status.value, 1 if required else 0, jdump(sorted(depends_on)),
+             description, execution_capability),
         )
         conn.execute(
             "UPDATE plans SET dependency_graph = ?, revision = revision + 1 WHERE id = ?",
@@ -295,8 +307,148 @@ def add_dependency(store: Store, plan_id: str, step_id: str,
         return Ok()
 
 
-# ── Plan activation (Contract §4) ─────────────────────────────────────────────
+def create_plan_with_steps(store: Store, task_id: str, step_specs: list[dict],
+                           expected_task_revision: int) -> Result:
+    """Atomic plan acceptance (Cognition Implementation Contract §11.6/§50):
+    create the Plan, its Steps, and every verification-requirement binding in
+    ONE transaction. Either the whole proposal commits or nothing does —
+    propose_plan never leaves partial canonical state.
 
+    step_specs entries (validated by Cognition first; re-validated here with
+    the SAME rules, because Cognition validation is fast-fail, never the
+    authority — §6):
+      {
+        "description": str,
+        "required": bool,
+        "depends_on_index": list[int],          # positions in THIS list only
+        "execution_capability": str,
+        "verification_requirements": [
+            {"method_name": str, "applies_to_capability": str}, ...
+        ],
+      }
+
+    Authoritative checks inside this transaction:
+      * Task exists, revision CAS, lifecycle (not terminal);
+      * non-empty step collection; every execution_capability is registered;
+      * dependency indices valid, unique, non-self; graph acyclic (Law 13 —
+        _has_cycle, the same check add_dependency uses);
+      * for every verification requirement: method registered (§28) AND
+        applies_to_capability == step.execution_capability (§11.5/§29);
+      * requirement binding: create the claim + PENDING verification rows and
+        bind them to the Task via the canonical binding table, in the SAME
+        commit — Cognition never calls bind_required_verification (§27).
+    """
+    from v5 import capabilities as _caps
+    from v5 import evidence as _ev
+    from v5.enums import ClaimConfidence
+    from v5.verification import get_method
+
+    with store.write() as conn:
+        task = load_task(conn, task_id)
+        if task is None:
+            return Rejected(R_NOT_FOUND, f"task {task_id}", None)
+        if task.revision != expected_task_revision:
+            return Rejected(R_STALE_REVISION,
+                            f"task revision={task.revision} expected={expected_task_revision}", task)
+        if task.status in TASK_TERMINAL:
+            return Rejected(R_TERMINAL, f"task {task.status.value} (Law 14)", task)
+        if not step_specs:
+            return Rejected("MALFORMED_PROPOSAL", "steps must be a non-empty list", None)
+
+        # authoritative re-validation of the step specs (mirror of the
+        # adapter's checks — the trust boundary re-check, §6)
+        n = len(step_specs)
+        for i, spec in enumerate(step_specs):
+            cap = spec.get("execution_capability", "")
+            if not cap or not isinstance(cap, str):
+                return Rejected("MALFORMED_PROPOSAL", f"step {i}: execution_capability is required", None)
+            if _caps.get(cap) is None:
+                return Rejected("MALFORMED_PROPOSAL", f"step {i}: unknown capability {cap!r}", None)
+            deps = spec.get("depends_on_index", [])
+            seen: set[int] = set()
+            for d in deps:
+                if not isinstance(d, int) or isinstance(d, bool):
+                    return Rejected("MALFORMED_PROPOSAL", f"step {i}: dependency index {d!r} is not an int", None)
+                if d < 0 or d >= n:
+                    return Rejected("MALFORMED_PROPOSAL",
+                                    f"step {i}: dependency index {d} is outside this plan's step list", None)
+                if d in seen:
+                    return Rejected("MALFORMED_PROPOSAL", f"step {i}: duplicate dependency index {d}", None)
+                seen.add(d)
+            for req in spec.get("verification_requirements", []):
+                mn = req.get("method_name", "")
+                atc = req.get("applies_to_capability", "")
+                if not mn or not isinstance(mn, str):
+                    return Rejected("MALFORMED_PROPOSAL", f"step {i}: verification method_name is required", None)
+                if get_method(mn) is None:
+                    return Rejected("UNKNOWN_VERIFICATION_METHOD",
+                                    f"step {i}: unknown verification method {mn!r} (§28)", None)
+                if atc != cap:
+                    return Rejected("VERIFICATION_CAPABILITY_MISMATCH",
+                                    f"step {i}: verification requirement applies_to_capability "
+                                    f"{atc!r} != execution_capability {cap!r} (§11.5/§29)", None)
+
+        # dependency graph over positions -> build after ids are minted
+        plan = Plan(id=new_id("plan"), revision=0, task_id=task_id,
+                    status=PlanStatus.DRAFT, superseded_by=None, dependency_graph={})
+        step_ids = [new_id("step") for _ in step_specs]
+        graph: dict[str, set] = {}
+        for i, spec in enumerate(step_specs):
+            graph[step_ids[i]] = {step_ids[d] for d in spec.get("depends_on_index", [])}
+        if _has_cycle(graph):
+            return Rejected(R_DEPENDENCY_CYCLE, "dependency graph would contain a cycle (Law 13)", None)
+
+        conn.execute(
+            "INSERT INTO plans (id, revision, task_id, status, superseded_by, dependency_graph) "
+            "VALUES (?,?,?,?,?,?)",
+            (plan.id, 0, task_id, plan.status.value, None,
+             jdump({k: sorted(v) for k, v in graph.items()})),
+        )
+        steps: list[Step] = []
+        bound_requirements: list[dict] = []
+        for i, spec in enumerate(step_specs):
+            s = Step(id=step_ids[i], revision=0, plan_id=plan.id,
+                     status=StepStatus.PENDING, required=bool(spec.get("required", True)),
+                     depends_on=set(graph[step_ids[i]]),
+                     description=spec.get("description", ""),
+                     execution_capability=spec["execution_capability"])
+            conn.execute(
+                "INSERT INTO steps (id, revision, plan_id, status, required, depends_on, description, execution_capability) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (s.id, 0, plan.id, s.status.value, 1 if s.required else 0,
+                 jdump(sorted(graph[step_ids[i]])), s.description, s.execution_capability),
+            )
+            store.audit(conn, s.id, "created", None, s.status.value)
+            steps.append(s)
+            for req in spec.get("verification_requirements", []):
+                # declare the requirement as claim + PENDING verification, bound
+                # to the Task (the completion authority's Law 16 gate) —
+                # Work Service is the sole caller of the binding path (§27)
+                claim = _ev._create_claim_locked(
+                    store, conn,
+                    f"step outcome satisfied: {spec.get('description', '')[:120]}",
+                    [], "work_service", ClaimConfidence.UNVERIFIED,
+                )
+                if isinstance(claim, Rejected):
+                    return claim
+                ver = _ev._create_verification_locked(
+                    store, conn, claim.value.id, req["method_name"], "deterministic",
+                )
+                if isinstance(ver, Rejected):
+                    return ver
+                bound = _bind_required_verification_locked(conn, task_id, ver.value.id)
+                if isinstance(bound, Rejected):
+                    return bound
+                bound_requirements.append(
+                    {"step_id": s.id, "method_name": req["method_name"],
+                     "verification_id": ver.value.id, "claim_id": claim.value.id}
+                )
+        store.audit(conn, plan.id, "created", None, plan.status.value,
+                    reason=f"plan with {len(steps)} steps (cognition proposal)")
+        return Ok({"plan": plan, "steps": steps, "bound_verifications": bound_requirements})
+
+
+# ── Plan activation (Contract §4) ─────────────────────────────────────────────
 def activate_plan(store: Store, task_id: str, plan_id: str,
                   expected_task_revision: int) -> Result:
     """SINGLE atomic operation — the only legal way to make a Plan active.
@@ -458,23 +610,29 @@ def bind_required_verification(store: Store, object_id: str, verification_id: st
     Both endpoints must exist: a dangling binding to a nonexistent object is
     an orphan row that proves nothing about anything (the bound object is the
     thing completion is claimed for). The completion authority supports
-    Task|Goal (`complete_object`); bindings to other kinds have no effect and
-    are rejected at bind time — fail fast, not silently."""
+    Task|Goal (`complete_object`) — bindings to other kinds have no effect and
+    are rejected at bind time: fail fast, not silently."""
     with store.write() as conn:
-        obj, kind = _load_object(conn, object_id)
-        if obj is None:
-            return Rejected(R_NOT_FOUND, f"binding target {object_id}", None)
-        if kind not in ("task", "goal"):
-            return Rejected(R_INVALID_TRANSITION,
-                            f"required-verification bindings apply to completable Task|Goal, got {kind}",
-                            obj)
-        if conn.execute("SELECT 1 FROM verifications WHERE id = ?", (verification_id,)).fetchone() is None:
-            return Rejected(R_NOT_FOUND, f"verification {verification_id}", None)
-        conn.execute(
-            "INSERT OR IGNORE INTO required_verifications (object_id, verification_id) VALUES (?,?)",
-            (object_id, verification_id),
-        )
-        return Ok()
+        return _bind_required_verification_locked(conn, object_id, verification_id)
+
+
+def _bind_required_verification_locked(conn, object_id: str, verification_id: str) -> Result:
+    """Locked core — composable inside Work Service's own transactions (the
+    atomic plan acceptance binds declared requirements in the same commit)."""
+    obj, kind = _load_object(conn, object_id)
+    if obj is None:
+        return Rejected(R_NOT_FOUND, f"binding target {object_id}", None)
+    if kind not in ("task", "goal"):
+        return Rejected(R_INVALID_TRANSITION,
+                        f"required-verification bindings apply to completable Task|Goal, got {kind}",
+                        obj)
+    if conn.execute("SELECT 1 FROM verifications WHERE id = ?", (verification_id,)).fetchone() is None:
+        return Rejected(R_NOT_FOUND, f"verification {verification_id}", None)
+    conn.execute(
+        "INSERT OR IGNORE INTO required_verifications (object_id, verification_id) VALUES (?,?)",
+        (object_id, verification_id),
+    )
+    return Ok()
 
 
 def complete_object(store: Store, obj_id: str, expected_revision: int) -> Result:
