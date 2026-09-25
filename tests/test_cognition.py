@@ -467,17 +467,25 @@ class TestStaleState:
     def test_stale_step_revision_rejected(self, store, session, tmp_path):
         target = tmp_path / "stale_step.txt"
         _, task, plan, step, action, ver = _propose_chain(store, session, target, "x")
-        # execute the action (bumps nothing on the step), then bump the STEP
         caps.execute_action(store, action, caps.get("file_write"),
                             safety_check=make_confirmation_gate(required=False),
                             plan_id_for_validation=plan.id)
         from v5.enums import StepStatus as SS
+        # the READY transition below consumes the step's current revision, so
+        # `step.revision` (the outer, pre-transition snapshot) is stale;
+        # the post-transition object's revision is one higher.
         s = work.load_step(store.read(), step.id)
         s = work.transition_object(store, s.id, SS.READY, s.revision).value
-        # now step.revision is current.revision; stale proposal uses step.revision
         r = cognition.propose_action(step.id, step.revision, "file_write",
                                      {"path": str(target), "content": "y"})
         assert isinstance(r, Rejected) and r.reason == "STALE_REVISION"
+        # §45 recovery half: reread authoritative current Step state and
+        # re-propose using its current revision — this must evaluate normally,
+        # not by incrementing the stale number locally.
+        current = work.load_step(store.read(), step.id)
+        r2 = cognition.propose_action(step.id, current.revision, "file_write",
+                                      {"path": str(target), "content": "y"})
+        assert isinstance(r2, Ok), r2
 
     def test_stale_task_revision_rejected(self, store, session):
         """§45 — the task-level link in the stale chain (goal/task/step all
@@ -496,6 +504,124 @@ class TestStaleState:
         cur = work.load_task(store.read(), t.id)
         r2 = cognition.propose_plan(t.id, cur.revision, steps)
         assert isinstance(r2, Ok), r2
+
+
+# ═══ 2026-09 audit item 1: PASS-without-execution closure ═══════════════════
+
+class TestNoPassWithoutExecution:
+    """Emission Is Not Occurrence gate (Interface Contract §1, Impl §34/§35).
+
+    The audit's exact exploit: a never-executed file_write Action whose
+    arguments match an already-existing file used to PASS. These tests prove
+    every non-OBSERVED status and every unrelated binding cannot produce a
+    Verification result of any kind (let alone PASS), and the legitimate
+    OBSERVED path still works.
+    """
+
+    def test_the_exact_audit_exploit_pending_action(self, store, session, tmp_path):
+        """The reproduced exploit, verbatim: pre-existing matching file +
+        PENDING (never-executed) Action → must REJECT, not PASS."""
+        target = tmp_path / "exploit.txt"
+        target.write_text("pre-existing content that happens to match")
+        _, task, plan, step, action, ver_id = _propose_chain(
+            store, session, target, "pre-existing content that happens to match")
+        a = execution.load_action(store.read(), action.id)
+        assert a.status.value == "PENDING"
+        r = verification.run_method_for_action(store, ver_id, action.id)
+        assert isinstance(r, Rejected) and r.reason == "ACTION_NOT_EXECUTED"
+        # the verification stays uncompleted; completion still blocked
+        v = evidence.load_verification(store, ver_id)
+        assert v.result.value == "PENDING"
+
+    def test_executing_never_reaching_observed_rejected(self, store, session, tmp_path):
+        target = tmp_path / "mid.txt"
+        target.write_text("content")
+        _, task, plan, step, action, ver_id = _propose_chain(store, session, target, "content")
+        # begin executing (Law 8 persists EXECUTING) but never reach OBSERVED
+        begun = execution.begin_executing(
+            store, action.id, action.revision,
+            safety_check=make_confirmation_gate(required=False),
+            expected_plan_id=plan.id,
+        )
+        assert isinstance(begun, Ok), begun
+        r = verification.run_method_for_action(store, ver_id, action.id)
+        assert isinstance(r, Rejected) and r.reason == "ACTION_NOT_EXECUTED"
+
+    def test_failed_action_rejected(self, store, session, tmp_path):
+        target = tmp_path / "failed.txt"
+        target.write_text("content")
+        _, task, plan, step, action, ver_id = _propose_chain(store, session, target, "content")
+        begun = execution.begin_executing(
+            store, action.id, action.revision,
+            safety_check=make_confirmation_gate(required=False),
+            expected_plan_id=plan.id,
+        ).value
+        execution.mark_failed(store, begun.id, begun.revision, "definite no effect",
+                              definite_no_effect=True)
+        r = verification.run_method_for_action(store, ver_id, action.id)
+        assert isinstance(r, Rejected) and r.reason == "ACTION_NOT_EXECUTED"
+
+    def test_unknown_outcome_action_rejected(self, store, session, tmp_path):
+        target = tmp_path / "unknown.txt"
+        target.write_text("content")
+        _, task, plan, step, action, ver_id = _propose_chain(store, session, target, "content")
+        begun = execution.begin_executing(
+            store, action.id, action.revision,
+            safety_check=make_confirmation_gate(required=False),
+            expected_plan_id=plan.id,
+        ).value
+        execution.mark_unknown_outcome(store, begun.id, begun.revision,
+                                       "process died", "file may or may not exist")
+        r = verification.run_method_for_action(store, ver_id, action.id)
+        assert isinstance(r, Rejected) and r.reason == "ACTION_NOT_EXECUTED"
+        # and the obligation still exists, unresolved
+        obls = obligations.list_open_obligations(store, owner=task.id)
+        assert len(obls) == 1
+
+    def test_unrelated_action_different_step_rejected(self, store, session, tmp_path):
+        """An OBSERVED action whose args happen to satisfy the evaluator,
+        but from a DIFFERENT step, is rejected as not-bound."""
+        target = tmp_path / "unrel.txt"
+        content = "shared bytes"
+        _, task, plan, step, action, ver_id = _propose_chain(store, session, target, content)
+        # second step in another plan of the same goal, same capability+args
+        sess2 = sessions.create_session(store)
+        cognition.authenticate_session(sess2.id)
+        g2 = cognition.propose_goal(sess2.id, "another goal", _policy()).value
+        t2 = cognition.propose_task(g2.id, g2.revision, "another task", _policy()).value
+        work.transition_object(store, t2.id, TaskStatus.ACTIVE, t2.revision)
+        p2 = cognition.propose_plan(t2.id, work.load_task(store.read(), t2.id).revision, [
+            cognition.StepProposal("write it too", True, [], "file_write")
+        ]).value
+        step2 = p2["steps"][0]
+        work.activate_plan(store, t2.id, p2["plan"].id,
+                           work.load_task(store.read(), t2.id).revision)
+        action2 = cognition.propose_action(step2.id, step2.revision, "file_write",
+                                           {"path": str(target), "content": content}).value
+        # REALLY execute the unrelated action (it reaches OBSERVED legitimately)
+        ok, rej = caps.execute_action(store, action2, caps.get("file_write"),
+                                      safety_check=make_confirmation_gate(required=False),
+                                      plan_id_for_validation=p2["plan"].id)
+        assert rej is None and ok.value["status"] == "OBSERVED"
+        # now try to satisfy the ORIGINAL requirement with the unrelated action
+        r = verification.run_method_for_action(store, ver_id, action2.id)
+        assert isinstance(r, Rejected) and r.reason == "ACTION_NOT_BOUND_TO_REQUIREMENT"
+        v = evidence.load_verification(store, ver_id)
+        assert v.result.value == "PENDING"
+
+    def test_legit_observed_path_still_passes(self, store, session, tmp_path):
+        """The existing correct flow is untouched: execute → OBSERVED →
+        independent verification → PASS."""
+        target = tmp_path / "legit.txt"
+        _, task, plan, step, action, ver_id = _propose_chain(store, session, target, "truth")
+        ok, rej = caps.execute_action(store, action, caps.get("file_write"),
+                                      safety_check=make_confirmation_gate(required=False),
+                                      plan_id_for_validation=plan.id)
+        assert rej is None
+        a = execution.load_action(store.read(), action.id)
+        assert a.status.value == "OBSERVED"
+        r = verification.run_method_for_action(store, ver_id, action.id)
+        assert isinstance(r, Ok) and r.value["result"] == VerificationResult.PASS
 
 
 # ═══ §26 — duplicates ═══════════════════════════════════════════════════════
@@ -609,9 +735,34 @@ class TestFailureSemantics:
         assert rej is None and ok.value["status"] == "UNKNOWN_OUTCOME"
         open_obls = obligations.list_open_obligations(store, owner=task.id)
         assert len(open_obls) == 1
-        # verification truth: the file does not exist -> FAIL, no false PASS
+        # Per the 2026-09 audit fix: an UNKNOWN_OUTCOME action can NEVER be
+        # verified through the requirement path — uncertainty must NOT be
+        # resolvable by re-running the requirement; it is resolved via the
+        # obligation path with its own provenance gate.
         r = verification.run_method_for_action(store, ver_id, action.id)
-        assert r.value["result"] == VerificationResult.FAIL
+        assert isinstance(r, Rejected) and r.reason == "ACTION_NOT_EXECUTED"
+        assert not target.exists()   # the phantom write never happened
+        # the truthful "file absent" check goes through obligation resolution:
+        manual_obs = "obs_manual_unresolved_1"
+        with store.write() as conn:
+            conn.execute(
+                "INSERT INTO observations (id, action_id, captured_at, raw_result, execution_source) "
+                "VALUES (?,?,?,?,?)",
+                (manual_obs, action.id, "2026-09-25T00:00:00Z", "{}", "manual_check"),
+            )
+        ev = evidence.record_runtime_evidence(store, manual_obs, source="manual_check",
+                                              relevance_to=task.id,
+                                              content={"file_absent": True}).value
+        claim = evidence.create_claim(store, "the write never happened",
+                                      based_on=[ev.id], made_by="inspector",
+                                      confidence=evidence.ClaimConfidence.HIGH).value
+        ver2 = evidence.create_verification(store, claim.id, "existence_check",
+                                            "direct_observation").value
+        evidence.run_verification(store, ver2.id, lambda c, e: not target.exists())
+        obl_now = obligations.load_obligation(store.read(), open_obls[0].id)
+        rr = obligations.resolve_obligation(store, obl_now.id, ver2.id,
+                                            expected_revision=obl_now.revision)
+        assert isinstance(rr, Ok)   # resolved through the sanctioned path
 
 
 # ═══ fabrication sweep (§48 compact) + structural membrane guarantees ═══════
@@ -667,27 +818,107 @@ class TestFabricationSweep:
 # ═══ migration v3 + canonical-data regression ═══════════════════════════════
 
 class TestCognitionFoundation:
-    def test_v3_migration_on_existing_v2_db(self, tmp_path):
-        """A v2 database (steps without the new columns, no sessions table,
-        user_version=2) upgrades additively under v3."""
+    def test_v1_to_v3plus_migration_preserves_all_rows(self, tmp_path):
+        """A v1 database (pre-migrations) with real rows across all core
+        tables upgrades additively through the full chain (v2 evidence column,
+        v3 steps columns + sessions, v4 verifications.step_id) without losing
+        or altering existing data."""
         import sqlite3
         from v5.store import Store
-        db = str(tmp_path / "v2.db")
+        db = str(tmp_path / "v1.db")
         conn = sqlite3.connect(db)
-        old_steps = """CREATE TABLE steps (id TEXT PRIMARY KEY, revision INTEGER NOT NULL,
-                       plan_id TEXT NOT NULL, status TEXT NOT NULL,
-                       required INTEGER NOT NULL, depends_on TEXT NOT NULL DEFAULT '[]');"""
-        conn.executescript(old_steps)
-        conn.execute("INSERT INTO steps (id, revision, plan_id, status, required) "
-                     "VALUES ('step_old', 0, 'p', 'PENDING', 1)")
-        conn.execute("PRAGMA user_version = 2")
+        conn.executescript("""
+        CREATE TABLE goals (id TEXT PRIMARY KEY, revision INTEGER NOT NULL,
+                            status TEXT NOT NULL, completion_policy TEXT NOT NULL,
+                            created_at TEXT NOT NULL, session_origin TEXT,
+                            integrity TEXT NOT NULL DEFAULT 'OK');
+        CREATE TABLE tasks (id TEXT PRIMARY KEY, revision INTEGER NOT NULL,
+                            goal_id TEXT NOT NULL, status TEXT NOT NULL,
+                            active_plan_id TEXT, completion_policy TEXT NOT NULL,
+                            retry_budget TEXT NOT NULL,
+                            integrity TEXT NOT NULL DEFAULT 'OK');
+        CREATE TABLE plans (id TEXT PRIMARY KEY, revision INTEGER NOT NULL,
+                            task_id TEXT NOT NULL, status TEXT NOT NULL,
+                            superseded_by TEXT, dependency_graph TEXT NOT NULL DEFAULT '{}');
+        CREATE TABLE steps (id TEXT PRIMARY KEY, revision INTEGER NOT NULL,
+                            plan_id TEXT NOT NULL, status TEXT NOT NULL,
+                            required INTEGER NOT NULL, depends_on TEXT NOT NULL DEFAULT '[]');
+        CREATE TABLE actions (id TEXT PRIMARY KEY, revision INTEGER NOT NULL,
+                              step_id TEXT NOT NULL, status TEXT NOT NULL,
+                              capability TEXT NOT NULL, arguments TEXT NOT NULL,
+                              idempotency_class TEXT NOT NULL, confirmation_id TEXT,
+                              retry_of TEXT, integrity TEXT NOT NULL DEFAULT 'OK');
+        CREATE TABLE evidence (id TEXT PRIMARY KEY, status TEXT NOT NULL,
+                               acquisition_method TEXT NOT NULL, source TEXT NOT NULL,
+                               relevance_to TEXT NOT NULL, timestamp TEXT NOT NULL,
+                               content TEXT NOT NULL);
+        CREATE TABLE claims (id TEXT NOT NULL, version INTEGER NOT NULL,
+                             asserts TEXT NOT NULL, based_on TEXT NOT NULL DEFAULT '[]',
+                             confidence TEXT NOT NULL, made_by TEXT NOT NULL,
+                             PRIMARY KEY (id, version));
+        CREATE TABLE verifications (id TEXT PRIMARY KEY, verifies TEXT NOT NULL,
+                                    method TEXT NOT NULL, independence_level TEXT NOT NULL,
+                                    result TEXT NOT NULL, timestamp TEXT NOT NULL);
+        """)
+        conn.executemany("INSERT INTO goals VALUES (?,?,?,?,?,?,?)",
+                         [("goal_old", 0, "ACTIVE", '{"rule":"ALL_REQUIRED"}',
+                           "2026-01-01T00:00:00Z", "legacy_session", "OK")])
+        conn.executemany("INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?)",
+                         [("task_old", 0, "goal_old", "PENDING", None,
+                           '{"rule":"ALL_REQUIRED"}', '{"max_attempts":3,"attempts_used":0}',
+                           "OK")])
+        conn.executemany("INSERT INTO plans VALUES (?,?,?,?,?,?)",
+                         [("plan_old", 0, "task_old", "DRAFT", None, "{}")])
+        conn.executemany("INSERT INTO steps VALUES (?,?,?,?,?,?)",
+                         [("step_old", 0, "plan_old", "PENDING", 1, "[]")])
+        conn.executemany(
+            "INSERT INTO actions VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [("act_old", 0, "step_old", "PENDING", "file_write",
+              '{"path":"/tmp/v1.txt","content":"legacy"}', "IDEMPOTENT", None, None, "OK")])
+        conn.executemany("INSERT INTO evidence VALUES (?,?,?,?,?,?,?)",
+                         [("ev_old", "COLLECTED", "manual", "s", "t",
+                           "2026-01-01T00:00:00Z", "{}")])
+        conn.executemany("INSERT INTO verifications VALUES (?,?,?,?,?,?)",
+                         [("ver_old", "clm_old", "m", "deterministic", "PENDING",
+                           "2026-01-01T00:00:00Z")])
+        conn.execute("PRAGMA user_version = 1")
         conn.commit(); conn.close()
 
-        s = Store(db)
-        cols = [r[1] for r in s.read().execute("PRAGMA table_info(steps)").fetchall()]
-        assert "description" in cols and "execution_capability" in cols
-        assert s.read().execute("SELECT 1 FROM sessions LIMIT 1")  # table now exists
-        s.close()
+        s = Store(db)  # init must migrate v1 -> current
+        try:
+            rd = s.read()
+            # all pre-existing rows intact with their original data
+            assert rd.execute("SELECT * FROM goals WHERE id='goal_old'").fetchone()["session_origin"] == "legacy_session"
+            assert rd.execute("SELECT status FROM tasks WHERE id='task_old'").fetchone()["status"] == "PENDING"
+            assert rd.execute("SELECT status FROM plans WHERE id='plan_old'").fetchone()["status"] == "DRAFT"
+            step_old = rd.execute("SELECT * FROM steps WHERE id='step_old'").fetchone()
+            assert step_old["status"] == "PENDING" and step_old["required"] == 1
+            assert step_old["description"] == "" and step_old["execution_capability"] == ""
+            assert rd.execute("SELECT * FROM actions WHERE id='act_old'").fetchone()["capability"] == "file_write"
+            ev_old = rd.execute("SELECT * FROM evidence WHERE id='ev_old'").fetchone()
+            assert ev_old["status"] == "COLLECTED"
+            assert "origin_observation_id" in ev_old.keys()
+            assert ev_old["origin_observation_id"] is None
+            ver_old = rd.execute("SELECT * FROM verifications WHERE id='ver_old'").fetchone()
+            assert ver_old["result"] == "PENDING"
+            assert "step_id" in ver_old.keys() and ver_old["step_id"] is None
+            # sessions table exists and is queryable
+            rd.execute("SELECT * FROM sessions LIMIT 1").fetchall()
+            # version advanced all the way
+            assert rd.execute("PRAGMA user_version").fetchone()[0] == 4
+        finally:
+            s.close()
+
+        # opening the same file a second time is idempotent: no error, no
+        # double-migration, version stays at the current SCHEMA_VERSION
+        s2 = Store(db)
+        try:
+            assert s2.read().execute("PRAGMA user_version").fetchone()[0] == Store.SCHEMA_VERSION
+            assert s2.read().execute(
+                "SELECT description FROM steps WHERE id='step_old'").fetchone()["description"] == ""
+        finally:
+            s2.close()
+
 
     def test_sessions_table_has_no_principal_column(self, store):
         """§13.2 boundary: principal_id lives ONLY in the threaded context +

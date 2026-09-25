@@ -374,9 +374,14 @@ was possible while cycle-checks only guarded the normal add path.)
 `PRAGMA user_version` (no separate framework, no extra tables). Migrations
 are strictly additive (`ALTER TABLE ... ADD COLUMN`), idempotent
 (`PRAGMA table_info` guard), and atomically bounded in a normal write
-transaction. Current version is 2: v2 adds `evidence.origin_observation_id`
-(Fix 6/20 provenance column). A v1 database with pre-existing rows upgrades
-safely: the column is added, no rows are touched, `user_version` advances.
+transaction. v2 added `evidence.origin_observation_id`
+(Fix 6/20 provenance column); subsequent migrations numbered themselves at
+the tail of this file — v3 added `steps.description` /
+`steps.execution_capability` + the `sessions` table (Cognition contract,
+see #26) and v4 adds `verifications.step_id` (requirement provenance,
+see #27). A legacy database with pre-existing rows upgrades safely through
+the additive chain: columns are added, no rows are touched,
+`user_version` advances.
 
 This exists because `CREATE TABLE IF NOT EXISTS` cannot add a column to an
 already-opened production database. It is the smallest mechanism that does
@@ -505,3 +510,32 @@ test passes); session_origin is inert under direct corruption (test proves
 it); principal_id never reaches the schema (schema test); duplicate
 proposals cannot create duplicates (same-emission dedupe; cross-emission is
 by design); no parallel authority exists (structural import-grep test).
+
+## 27. Emission Is Not Occurrence gate on verification (2026-09 audit fix)
+
+**The defect**: an independently-reproduced exploit — propose a `file_write`
+Action whose arguments match an already-existing file, NEVER execute it, then
+run the step's requirement verification → PASS fabricated. The evaluator read
+the filesystem (independent) but never established that the Action itself
+actually executed, nor that the Action was the one bound to the requirement.
+
+**The fix (single authoritative boundary)**: `run_verification(...,
+for_action_id=...)` gains a mandatory-when-bound precondition, evaluated
+inside the RUNNING transaction (so no racy check-then-verify window):
+  1. the Action exists and is `OBSERVED` (only status that establishes an
+     external effect was observed — PENDING/EXECUTING/FAILED/UNKNOWN_OUTCOME
+     all reject with the new `R_ACTION_NOT_EXECUTED`), and
+  2. if the Verification is requirement-bound (verifications.step_id, set at
+     plan commit by `create_plan_with_steps`), the Action must belong to THAT
+     step — `R_ACTION_NOT_BOUND` otherwise.
+The same two checks repeat in the result-commit transaction so a status
+flip between RUNNING and result-commit can't strand a false verdict.
+`verification.run_method_for_action` always passes the Action id through.
+New rejection codes are documented in `v5/models.py` alongside the others.
+
+**Cross-reference**: schema migration mechanism (#24) records v4
+(`verifications.step_id`); this entry is what v4 exists for.
+
+**Tests**: `tests/test_cognition.py::TestNoPassWithoutExecution` — the exact
+exploit + PENDING/EXECUTING/FAILED/UNKNOWN_OUTCOME/unrelated-Action
+rejections + the legitimate OBSERVED→PASS path stays green.

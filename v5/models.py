@@ -147,11 +147,16 @@ class Claim:
 @dataclass
 class Verification:
     id: str
-    verifies: str                       # claim id
+    verifies: str                     # claim id
     method: str
     independence_level: str
     result: VerificationResult
     timestamp: datetime
+    # Cognition requirement binding (2026-09 audit): when this verification was
+    # declared by a StepProposal.verification_requirements entry, the Step that
+    # declared it. Set once at creation; immutable. NULL for foundation-created
+    # verifications that are not step-requirement-bound.
+    step_id: str | None = None
 
 
 @dataclass
@@ -224,3 +229,8 @@ R_EVIDENCE_STATUS = "EVIDENCE_STATUS_FORBIDDEN"
 # Cognition Implementation Contract v1.1 §7/§13.3
 R_MALFORMED_PROPOSAL = "MALFORMED_PROPOSAL"
 R_UNAUTHORIZED = "UNAUTHORIZED"
+# 2026-09 audit fix (Interface Contract §1 "Emission Is Not Occurrence"):
+# a verification claiming an Action's outcome requires that Action to have
+# genuinely executed (OBSERVED), and to be the one bound to the requirement.
+R_ACTION_NOT_EXECUTED = "ACTION_NOT_EXECUTED"
+R_ACTION_NOT_BOUND = "ACTION_NOT_BOUND_TO_REQUIREMENT"

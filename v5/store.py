@@ -106,7 +106,8 @@ CREATE TABLE IF NOT EXISTS verifications (
     method TEXT NOT NULL,
     independence_level TEXT NOT NULL,
     result TEXT NOT NULL,
-    timestamp TEXT NOT NULL
+    timestamp TEXT NOT NULL,
+    step_id TEXT
 );
 CREATE TABLE IF NOT EXISTS obligations (
     id TEXT PRIMARY KEY,
@@ -209,7 +210,7 @@ class Store:
     # SQLite-native versioning via PRAGMA user_version. Additive upgrades only
     # (ALTER TABLE ... ADD COLUMN). Never destructive. Nothing here invents a
     # framework; each step is idempotent and transaction-bounded.
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def _apply_migrations(self):
         current = self._conn.execute("PRAGMA user_version").fetchone()[0]
@@ -232,6 +233,17 @@ class Store:
                     conn.execute("ALTER TABLE steps ADD COLUMN description TEXT NOT NULL DEFAULT ''")
                 if "execution_capability" not in cols:
                     conn.execute("ALTER TABLE steps ADD COLUMN execution_capability TEXT NOT NULL DEFAULT ''")
+            # v4: audit fix — Emission Is Not Occurrence. Verifications declared
+            # via StepProposal.verification_requirements record the step they
+            # were required for (NULL for foundation-created verifications not
+            # step-bound). run_verification uses this to gate that (a) the
+            # Action actually executed (OBSERVED) and (b) it is THE Action of
+            # the requirement's Step — blocking unexecuted/unrelated PASS
+            # fabrication (2026-09 audit finding vs Legal §1/§34/§35).
+            if current < 4:
+                cols = [r[1] for r in conn.execute("PRAGMA table_info(verifications)").fetchall()]
+                if "step_id" not in cols:
+                    conn.execute("ALTER TABLE verifications ADD COLUMN step_id TEXT")
             conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
 
     def close(self):

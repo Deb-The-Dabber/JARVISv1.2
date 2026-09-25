@@ -433,6 +433,8 @@ def create_plan_with_steps(store: Store, task_id: str, step_specs: list[dict],
                     return claim
                 ver = _ev._create_verification_locked(
                     store, conn, claim.value.id, req["method_name"], "deterministic",
+                    step_id=s.id,   # requirement provenance: the Step that
+                                    # declared this verification (audit fix)
                 )
                 if isinstance(ver, Rejected):
                     return ver

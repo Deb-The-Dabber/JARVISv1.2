@@ -109,7 +109,15 @@ def run_method_for_action(store: Store, verification_id: str, action_id: str):
     through the established run_verification path against a specific executed
     Action. The ONLY way a PASS can come to exist; this helper never writes
     results itself — it composes the registered evaluator with the canonical
-    run_verification path."""
+    run_verification path.
+
+    The underlying run_verification enforces the Emission Is Not Occurrence
+    gate in its own transaction: the Action must be OBSERVED (execution
+    actually happened and produced an Observation) and, for requirement-bound
+    verifications, must belong to the Step the requirement was declared on.
+    A never-executed PENDING Action — or any FAILED/UNKNOWN_OUTCOME one — is
+    rejected, not verified. An unrelated Action (different Step) is rejected,
+    not laundered through matching args."""
     from v5 import evidence
     ver = evidence.load_verification(store, verification_id)
     if ver is None:
@@ -120,4 +128,5 @@ def run_method_for_action(store: Store, verification_id: str, action_id: str):
         from v5.models import Rejected
         return Rejected("UNKNOWN_VERIFICATION_METHOD", f"method {ver.method}", None)
     evaluator = spec.make_evaluator(store, action_id)
-    return evidence.run_verification(store, verification_id, evaluator)
+    return evidence.run_verification(store, verification_id, evaluator,
+                                     for_action_id=action_id)

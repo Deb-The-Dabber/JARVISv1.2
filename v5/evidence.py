@@ -87,6 +87,7 @@ def load_verification(store: Store, verification_id: str) -> Verification | None
         id=r["id"], verifies=r["verifies"], method=r["method"],
         independence_level=r["independence_level"], result=VerificationResult(r["result"]),
         timestamp=r["timestamp"],
+        step_id=r["step_id"] if "step_id" in r.keys() else None,
     )
 
 
@@ -259,20 +260,24 @@ def claim_versions(store: Store, claim_id: str) -> list[Claim]:
 # ── Verification ─────────────────────────────────────────────────────────────
 
 def create_verification(store: Store, verifies_claim_id: str, method: str,
-                        independence_level: str) -> Result:
+                        independence_level: str, step_id: str | None = None) -> Result:
     if independence_level not in (
         "deterministic", "direct_observation", "independent_capability",
         "derived_computation", "llm_evaluation", "self_report",
     ):
         return Rejected("INVALID_INDEPENDENCE", f"independence_level {independence_level}", None)
     with store.write() as conn:
-        return _create_verification_locked(store, conn, verifies_claim_id, method, independence_level)
+        return _create_verification_locked(store, conn, verifies_claim_id, method,
+                                           independence_level, step_id=step_id)
 
 
 def _create_verification_locked(store: Store, conn, verifies_claim_id: str,
-                                method: str, independence_level: str) -> Result:
+                                method: str, independence_level: str,
+                                step_id: str | None = None) -> Result:
     """create_verification's checks+insert+audit against an open write
-    transaction (composed by Work Service's atomic plan acceptance)."""
+    transaction (composed by Work Service's atomic plan acceptance).
+    `step_id` records requirement provenance: which Step declared this
+    verification (audit fix — Emission Is Not Occurrence)."""
     if independence_level not in (
         "deterministic", "direct_observation", "independent_capability",
         "derived_computation", "llm_evaluation", "self_report",
@@ -280,33 +285,71 @@ def _create_verification_locked(store: Store, conn, verifies_claim_id: str,
         return Rejected("INVALID_INDEPENDENCE", f"independence_level {independence_level}", None)
     if conn.execute("SELECT 1 FROM claims WHERE id = ?", (verifies_claim_id,)).fetchone() is None:
         return Rejected(R_NOT_FOUND, f"claim {verifies_claim_id} not found", None)
+    if step_id is not None and \
+            conn.execute("SELECT 1 FROM steps WHERE id = ?", (step_id,)).fetchone() is None:
+        return Rejected(R_NOT_FOUND, f"step {step_id} not found", None)
     v = Verification(
         id=new_id("verification"), verifies=verifies_claim_id, method=method,
         independence_level=independence_level, result=VerificationResult.PENDING,
-        timestamp=iso(utcnow()),
+        timestamp=iso(utcnow()), step_id=step_id,
     )
     conn.execute(
-        "INSERT INTO verifications (id, verifies, method, independence_level, result, timestamp) "
-        "VALUES (?,?,?,?,?,?)",
-        (v.id, v.verifies, v.method, v.independence_level, v.result.value, v.timestamp),
+        "INSERT INTO verifications (id, verifies, method, independence_level, result, timestamp, step_id) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (v.id, v.verifies, v.method, v.independence_level, v.result.value, v.timestamp, step_id),
     )
     store.audit(conn, v.id, "verification_created", None, VerificationResult.PENDING.value)
     return Ok(v)
 
 
-def run_verification(store: Store, verification_id: str, evaluator) -> Result:
+def run_verification(store: Store, verification_id: str, evaluator,
+                     for_action_id: str | None = None) -> Result:
     """Evaluate a verification. The RUNNING state is durably committed FIRST
     (its own transaction), then the evaluation runs and the result commits.
     Crash point #6: if the process dies mid-run the persisted result is PENDING
     or RUNNING — the owning Claim is never treated as established (completion
     requires PASS, Law 16). Evaluator: (claim_row, evidence_rows) -> bool|None
-    (None -> INCONCLUSIVE)."""
+    (None -> INCONCLUSIVE).
+
+    Emission Is Not Occurrence gate (audit fix, 2026-09): when
+    `for_action_id` is supplied — always supplied by the requirement-runtime
+    path `run_method_for_action` — the first transaction ALSO proves, in the
+    same atomic boundary as the RUNNING commit:
+      * the Action exists and its status is OBSERVED (the only status that
+        establishes that an external effect was observed — PENDING/EXECUTING
+        never produced one; FAILED asserted definite-no-effect;
+        UNKNOWN_OUTCOME is precisely "we don't know"), and
+      * if the verification is requirement-bound to a Step
+        (verifications.step_id NOT NULL — set at plan commit), the Action
+        belongs to THAT step, so an unrelated action whose arguments happen
+        to satisfy the evaluator cannot launder a PASS into this requirement.
+    Rechecked identically inside the result-commit transaction, so a status
+    change between the two commits cannot strand a result written against a
+    stale state.
+    """
     with store.write() as conn:
         r = conn.execute("SELECT * FROM verifications WHERE id = ?", (verification_id,)).fetchone()
         if r is None:
             return Rejected(R_NOT_FOUND, f"verification {verification_id}", None)
         if r["result"] not in (VerificationResult.PENDING.value, VerificationResult.RUNNING.value):
             return Rejected("ALREADY_FINAL", f"result={r['result']}", None)
+        if for_action_id is not None:
+            from v5.models import R_ACTION_NOT_BOUND, R_ACTION_NOT_EXECUTED
+            a = conn.execute("SELECT status, step_id FROM actions WHERE id = ?",
+                             (for_action_id,)).fetchone()
+            if a is None:
+                return Rejected(R_NOT_FOUND, f"action {for_action_id}", None)
+            if a["status"] != "OBSERVED":
+                return Rejected(R_ACTION_NOT_EXECUTED,
+                                f"action {for_action_id} status={a['status']} — only OBSERVED "
+                                "actions can ground a verification of their effect "
+                                "(Emission Is Not Occurrence)", dict(r))
+            bound_step = r["step_id"] if "step_id" in r.keys() else None
+            if bound_step is not None and a["step_id"] != bound_step:
+                return Rejected(R_ACTION_NOT_BOUND,
+                                f"action {for_action_id} belongs to step {a['step_id']}, not "
+                                f"{bound_step} — this requirement's verification may only be "
+                                "grounded in the own step's executed action", dict(r))
         conn.execute(
             "UPDATE verifications SET result = 'RUNNING' WHERE id = ?", (verification_id,)
         )
@@ -316,6 +359,19 @@ def run_verification(store: Store, verification_id: str, evaluator) -> Result:
 
     with store.write() as conn:
         r = conn.execute("SELECT * FROM verifications WHERE id = ?", (verification_id,)).fetchone()
+        if for_action_id is not None:
+            from v5.models import R_ACTION_NOT_BOUND, R_ACTION_NOT_EXECUTED
+            a = conn.execute("SELECT status, step_id FROM actions WHERE id = ?",
+                             (for_action_id,)).fetchone()
+            if a is None or a["status"] != "OBSERVED":
+                return Rejected(R_ACTION_NOT_EXECUTED,
+                                "the action's status changed before the result committed "
+                                "(no longer OBSERVED)", dict(r))
+            bound_step = r["step_id"] if "step_id" in r.keys() else None
+            if bound_step is not None and a["step_id"] != bound_step:
+                return Rejected(R_ACTION_NOT_BOUND,
+                                "the action's step bind changed before the result committed",
+                                dict(r))
         claim = conn.execute(
             "SELECT * FROM claims WHERE id = ? ORDER BY version DESC LIMIT 1", (r["verifies"],)
         ).fetchone()
