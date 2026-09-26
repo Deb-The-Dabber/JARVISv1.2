@@ -1,0 +1,374 @@
+{
+  "ok": true,
+  "events": [
+    {
+      "turn": 1,
+      "stage": "goal",
+      "kind": "tool_call",
+      "detail": {
+        "calls": [
+          {
+            "operation": "propose_goal",
+            "args": {
+              "statement": "Create foo.txt containing Hello World",
+              "completion_policy": {
+                "rule": "ALL_REQUIRED"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "turn": 1,
+      "stage": "goal",
+      "kind": "result",
+      "detail": {
+        "operation": "propose_goal",
+        "status": "ok",
+        "result": {
+          "id": "goal_01M3FB2A9R733EVMXS9RN5C89K",
+          "revision": 0,
+          "status": "ACTIVE",
+          "completion_policy": {
+            "rule": "ALL_REQUIRED",
+            "n": null,
+            "criterion_ref": null
+          },
+          "created_at": "2026-09-26T17:09:07.512854+00:00",
+          "session_origin": "sess_01M3FB23D85ZKJ191S3S3GVARD",
+          "integrity": "OK"
+        }
+      }
+    },
+    {
+      "turn": 2,
+      "stage": "task",
+      "kind": "tool_call",
+      "detail": {
+        "calls": [
+          {
+            "operation": "propose_task",
+            "args": {
+              "goal_id": "goal_01M3FB2A9R733EVMXS9RN5C89K",
+              "expected_goal_revision": 0,
+              "statement": "Create foo.txt containing Hello World",
+              "completion_policy": {
+                "rule": "ALL_REQUIRED"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "turn": 2,
+      "stage": "task",
+      "kind": "result",
+      "detail": {
+        "operation": "propose_task",
+        "status": "ok",
+        "result": {
+          "id": "task_01M3FB2JN0PCQP80QWP5FE5RD3",
+          "revision": 0,
+          "goal_id": "goal_01M3FB2A9R733EVMXS9RN5C89K",
+          "status": "PENDING",
+          "active_plan_id": null,
+          "completion_policy": {
+            "rule": "ALL_REQUIRED",
+            "n": null,
+            "criterion_ref": null
+          },
+          "retry_budget": {
+            "max_attempts": 3,
+            "attempts_used": 0
+          },
+          "integrity": "OK"
+        }
+      }
+    },
+    {
+      "turn": 2,
+      "stage": "task",
+      "kind": "host_step",
+      "detail": {
+        "op": "activate_task",
+        "task_id": "task_01M3FB2JN0PCQP80QWP5FE5RD3",
+        "revision": 1
+      }
+    },
+    {
+      "turn": 3,
+      "stage": "plan",
+      "kind": "tool_call",
+      "detail": {
+        "calls": [
+          {
+            "operation": "propose_plan",
+            "args": {
+              "task_id": "task_01M3FB2JN0PCQP80QWP5FE5RD3",
+              "expected_task_revision": 0,
+              "steps": [
+                {
+                  "description": "Write Hello World to foo.txt",
+                  "required": true,
+                  "depends_on_index": [],
+                  "execution_capability": "file_write",
+                  "verification_requirements": [
+                    {
+                      "method_name": "verify_file_write",
+                      "applies_to_capability": "file_write"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "turn": 3,
+      "stage": "plan",
+      "kind": "result",
+      "detail": {
+        "operation": "propose_plan",
+        "status": "rejected",
+        "reason": "STALE_REVISION",
+        "detail": "task revision=1 expected=0",
+        "current": {
+          "id": "task_01M3FB2JN0PCQP80QWP5FE5RD3",
+          "revision": 1,
+          "goal_id": "goal_01M3FB2A9R733EVMXS9RN5C89K",
+          "status": "ACTIVE",
+          "active_plan_id": null,
+          "completion_policy": {
+            "rule": "ALL_REQUIRED",
+            "n": null,
+            "criterion_ref": null
+          },
+          "retry_budget": {
+            "max_attempts": 3,
+            "attempts_used": 0
+          },
+          "integrity": "OK"
+        }
+      }
+    },
+    {
+      "turn": 4,
+      "stage": "plan",
+      "kind": "tool_call",
+      "detail": {
+        "calls": [
+          {
+            "operation": "propose_plan",
+            "args": {
+              "task_id": "task_01M3FB2JN0PCQP80QWP5FE5RD3",
+              "expected_task_revision": 1,
+              "steps": [
+                {
+                  "description": "Write Hello World to foo.txt",
+                  "required": true,
+                  "depends_on_index": [],
+                  "execution_capability": "file_write",
+                  "verification_requirements": [
+                    {
+                      "method_name": "verify_file_write",
+                      "applies_to_capability": "file_write"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "turn": 4,
+      "stage": "plan",
+      "kind": "result",
+      "detail": {
+        "operation": "propose_plan",
+        "status": "ok",
+        "result": {
+          "plan": {
+            "id": "plan_01M3FB328QWFKQFRHX6CNPJ7XF",
+            "revision": 0,
+            "task_id": "task_01M3FB2JN0PCQP80QWP5FE5RD3",
+            "status": "DRAFT",
+            "superseded_by": null,
+            "dependency_graph": {}
+          },
+          "steps": [
+            {
+              "id": "step_01M3FB328QVXSB3XHYMESTAKZB",
+              "revision": 0,
+              "plan_id": "plan_01M3FB328QWFKQFRHX6CNPJ7XF",
+              "status": "PENDING",
+              "required": true,
+              "depends_on": [],
+              "description": "Write Hello World to foo.txt",
+              "execution_capability": "file_write"
+            }
+          ],
+          "bound_verifications": [
+            {
+              "step_id": "step_01M3FB328QVXSB3XHYMESTAKZB",
+              "method_name": "verify_file_write",
+              "verification_id": "ver_01M3FB328R9RRB9H9XF0S13X1P",
+              "claim_id": "clm_01M3FB328QWEXFB75K0GFSPJXE"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "turn": 4,
+      "stage": "plan",
+      "kind": "host_step",
+      "detail": {
+        "op": "activate_plan",
+        "plan_id": "plan_01M3FB328QWFKQFRHX6CNPJ7XF"
+      }
+    },
+    {
+      "turn": 5,
+      "stage": "action",
+      "kind": "tool_call",
+      "detail": {
+        "calls": [
+          {
+            "operation": "propose_action",
+            "args": {
+              "step_id": "step_01M3FB328QVXSB3XHYMESTAKZB",
+              "expected_step_revision": 0,
+              "capability": "file_write",
+              "arguments": {
+                "path": "/var/folders/f_/rcmw51wj1d397bjn7m33dhgh0000gn/T/jarvis_live_slice_ffh4oodc/foo.txt",
+                "content": "Hello World"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "turn": 5,
+      "stage": "action",
+      "kind": "result",
+      "detail": {
+        "operation": "propose_action",
+        "status": "ok",
+        "result": {
+          "id": "act_01M3FB34SGAN55HY7D7ZSPGECQ",
+          "revision": 0,
+          "step_id": "step_01M3FB328QVXSB3XHYMESTAKZB",
+          "status": "PENDING",
+          "capability": "file_write",
+          "arguments": {
+            "path": "/var/folders/f_/rcmw51wj1d397bjn7m33dhgh0000gn/T/jarvis_live_slice_ffh4oodc/foo.txt",
+            "content": "Hello World"
+          },
+          "idempotency_class": "IDEMPOTENT",
+          "confirmation_id": null,
+          "retry_of": null,
+          "integrity": "OK"
+        }
+      }
+    },
+    {
+      "turn": 5,
+      "stage": "execute",
+      "kind": "host_step",
+      "detail": {
+        "op": "execute_action",
+        "result": {
+          "status": "ok",
+          "result": {
+            "status": "OBSERVED",
+            "observation_id": "obs_01M3FB34SJ3RVXC15FRZAR4D2N",
+            "raw": {
+              "path": "/private/var/folders/f_/rcmw51wj1d397bjn7m33dhgh0000gn/T/jarvis_live_slice_ffh4oodc/foo.txt",
+              "bytes_written": 11,
+              "existed": false,
+              "overwrote": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "turn": 5,
+      "stage": "execute",
+      "kind": "host_step",
+      "detail": {
+        "op": "record_runtime_evidence",
+        "evidence_id": "ev_01M3FB34SKPT30D44PVH1F2250"
+      }
+    },
+    {
+      "turn": 5,
+      "stage": "verify",
+      "kind": "host_step",
+      "detail": {
+        "operation": "verify_file_write",
+        "verification_id": "ver_01M3FB328R9RRB9H9XF0S13X1P",
+        "result": {
+          "status": "ok",
+          "result": {
+            "result": "PASS"
+          }
+        }
+      }
+    },
+    {
+      "turn": 5,
+      "stage": "complete",
+      "kind": "host_step",
+      "detail": {
+        "op": "complete_step",
+        "status": "COMPLETED"
+      }
+    },
+    {
+      "turn": 5,
+      "stage": "complete",
+      "kind": "host_step",
+      "detail": {
+        "op": "complete_object(task)",
+        "result": {
+          "status": "ok",
+          "result": {
+            "object": {
+              "id": "task_01M3FB2JN0PCQP80QWP5FE5RD3",
+              "revision": 3,
+              "goal_id": "goal_01M3FB2A9R733EVMXS9RN5C89K",
+              "status": "COMPLETED",
+              "active_plan_id": null,
+              "completion_policy": {
+                "rule": "ALL_REQUIRED",
+                "n": null,
+                "criterion_ref": null
+              },
+              "retry_budget": {
+                "max_attempts": 3,
+                "attempts_used": 0
+              },
+              "integrity": "OK"
+            },
+            "obligations_transferred": 0
+          }
+        }
+      }
+    }
+  ],
+  "final": {
+    "file_exists": true,
+    "file_bytes_match": true,
+    "task_status": "COMPLETED",
+    "step_status": "COMPLETED"
+  },
+  "provider": "nvidia/nemotron-3-super-120b-a12b"
+}

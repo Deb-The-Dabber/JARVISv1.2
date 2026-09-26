@@ -539,3 +539,43 @@ New rejection codes are documented in `v5/models.py` alongside the others.
 **Tests**: `tests/test_cognition.py::TestNoPassWithoutExecution` — the exact
 exploit + PENDING/EXECUTING/FAILED/UNKNOWN_OUTCOME/unrelated-Action
 rejections + the legitimate OBSERVED→PASS path stays green.
+
+## 28. Live LLM Cognition Loop v1 (2026-09-26)
+
+**Scope**: the orchestration glue that drives the frozen Cognition membrane
+from a real deterministic model (one instruction, one provider, one linear
+tool-call chain). This passes the contracts' barrier between "code that
+proposes" and "code that commits".
+
+**Decisions recorded**:
+
+- **Module location**: `v5/live_loop.py`. Contracts authorize exactly this:
+  an adapter/host wrapper that calls the four frozen `propose_*` functions
+  (plus `cognition.parse_proposals`/`cognition.dispatch`) and the existing
+  execution-boundary/verification helpers. New directory/package creation
+  was rejected per the same "no parallel structure" rule.
+- **Provider**: NVIDIA NIM `nemotron-3-super-120b-a12b` (current V4 routing
+  slot), OpenAI-compatible native function-calling endpoint, temperature 0.
+  One provider, no routing/fallback/abstraction (§5 non-goal). The Gemini
+  2.5 Flash client's config was built and preserved
+  (`GeminiLiveClient`); the Gemini free-tier per-day quota was exhausted in
+  this environment during verification and NIM was the immediately-available
+  substitute. §1d's "single provider" rule is unaffected.
+- **Structured-tool-call-only**: only the arguments field of genuine
+  function-call responses reaches `cognition.parse_proposals`. A turn with no
+  function call is discarded, the model is re-prompted once, and then the
+  loop halts cleanly. No text-scraping/regex path exists.
+- **Stage gating**: exactly one tool exposed per stage (goal → task → plan →
+  action), generated from the frozen `_OPERATION_FIELDS`/`_STEP_*`/`_VR_*`
+  tables in `v5/cognition.py`. Off-stage calls are discarded as if narrated
+  (the frozen membrane independently rejects out-of-order calls anyway).
+- **Identity provenance**: `session_id` is read only from the authenticated
+  threaded context. `dispatch()` never uses model-supplied identity fields;
+  unknown-field rejection kills any attempt. provenance test in §1c confirms.
+- **Dedup scope**: only `parse_proposals`'s same-emission content-hash dedup;
+  no cross-turn/global suppression was added (§26).
+
+**Tests**: `tests/test_live_loop.py` (10 tests: schema-drift guard, missing
+field, unknown field, hallucinated id, identity injection, wrong-capability,
+narration-only, same-turn duplicates, offline chain, plus real-transcript
+artifact at `artifacts/live_slice_transcript.json`).
