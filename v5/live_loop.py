@@ -51,7 +51,7 @@ from typing import Any
 from v5 import capabilities as _caps
 from v5 import cognition, evidence, execution, sessions, verification, work
 from v5.cognition import _OPERATION_FIELDS, _STEP_OPTIONAL, _STEP_REQUIRED, _VR_OPTIONAL, _VR_REQUIRED
-from v5.enums import StepStatus, TaskStatus
+from v5.enums import StepStatus, TaskStatus, VerificationResult
 from v5.models import Ok, Rejected, Result
 from v5.safety import make_confirmation_gate
 from v5.store import Store
@@ -94,14 +94,13 @@ _FIELD_JSON_SCHEMA: dict[str, dict] = {
     "arguments": {
         "type": "object",
         "properties": {
-            # milestone-scoped: the only capability is file_write (§40/§54)
-            # with exactly these two declared keys — the model emits values,
-            # never invents keys (the adapter + create_action's validate_args
-            # still reject anything else; this is not a second authority).
-            "path": {"type": "string", "description": "absolute file path to write"},
-            "content": {"type": "string", "description": "content to write"},
+            # properties the milestone's capabilities declare. The membrane +
+            # create_action's validate_args remain authoritative; this is the
+            # model-facing guidance, not a second authority.
+            "path": {"type": "string", "description": "absolute file path"},
+            "content": {"type": "string",
+                        "description": "content to write (file_write required; omit for file_read)"},
         },
-        "required": ["path", "content"],
     },
     "steps": {
         "type": "array",
@@ -404,20 +403,108 @@ def _as_dict_args(args) -> dict:
     return json.loads(json.dumps(dict(args)))
 
 
+def _dependency_order(steps, dependency_graph) -> list:
+    """Topological order of the plan's Steps (deps first). Work Service
+    already rejected cycles at plan commit time (Law 13), and
+    create_plan_with_steps rejects out-of-range indices — so this is a plain
+    Kahn-style walk on the in-memory model the Ok returned."""
+    by_id = {s.id: s for s in steps}
+    order, done = [], set()
+    made_schedule = set()
+    while len(order) < len(steps):
+        progressed = False
+        for s in steps:
+            if s.id in made_schedule:
+                continue
+            deps = dependency_graph.get(s.id, set())
+            if all(d in done for d in deps):
+                order.append(s)
+                done.add(s.id)
+                made_schedule.add(s.id)
+                progressed = True
+        if not progressed:
+            # safety: graph was cycle-checked at commit; this is defensive.
+            raise RuntimeError("dependency graph could not be walked (cycle?)")
+    return order
+
+
+def _drive_step(store, plan, task, step, action, bindings, ev, turn):
+    """Drive ONE step through the existing boundary, in the same transaction
+    shape the single-step v1 code had: execute → OBSERVED → evidence → the
+    step's OWN verifications (bound at plan commit, filtered to this step id)
+    → READY → EXECUTING → COMPLETED. A verification failure, execution
+    rejection, or observation gap halts the run (none are papered over)."""
+    ok_req, rej = _caps.execute_action(
+        store, action, _caps.get(action.capability),
+        safety_check=make_confirmation_gate(required=False),
+        plan_id_for_validation=plan.id)
+    if rej is not None:
+        ev(turn, "execute", "host_step",
+           {"op": "execute_action", "step_id": step.id, "action_id": action.id,
+            "status": "rejected", "reason": rej.reason, "detail": rej.detail})
+        return Rejected(rej.reason, rej.detail, rej.current)
+    ev(turn, "execute", "host_step", {
+        "op": "execute_action", "step_id": step.id, "action_id": action.id,
+        "status": "ok",
+        "result": _result_payload(ok_req)})
+    if ok_req.value["status"] != "OBSERVED":
+        # FAILED / UNKNOWN_OUTCOME etc. — drive the Work-side lifecycle fairly,
+        # then the caller decides retry semantics. The Action is terminal;
+        # verification is meaningless here.
+        return Ok({"terminal_status": ok_req.value["status"], "action": action, "observation_id": None})
+
+    obs_id = ok_req.value["observation_id"]
+    evi = evidence.record_runtime_evidence(
+        store, obs_id, source=action.capability,
+        relevance_to=task.id,
+        content={"action_id": action.id}).value
+    ev(turn, "execute", "host_step", {"op": "record_runtime_evidence",
+                                      "evidence_id": evi.id, "step_id": step.id})
+
+    for binding in bindings:
+        if binding["step_id"] != step.id:
+            continue
+        vr = verification.run_method_for_action(store, binding["verification_id"], action.id)
+        ev(turn, "verify", "host_step", {
+            "operation": binding["method_name"],
+            "verification_id": binding["verification_id"],
+            "step_id": step.id,
+            "result": _result_payload(vr)})
+        if isinstance(vr, Rejected):
+            return Rejected(vr.reason, vr.detail, vr.current)
+        if vr.value["result"] != VerificationResult.PASS:
+            return Rejected("VERIFICATION_NOT_PASS",
+                            f"verification {binding['verification_id']} -> "
+                            f"{vr.value['result'].value}", None)
+
+    s = work.load_step(store.read(), step.id)
+    s = work.transition_object(store, s.id, StepStatus.READY, s.revision).value
+    s = work.transition_object(store, s.id, StepStatus.EXECUTING, s.revision).value
+    work.complete_step(store, s.id, s.revision)
+    s = work.load_step(store.read(), step.id)
+    ev(turn, "complete", "host_step", {"op": "complete_step", "step_id": step.id,
+                                       "status": s.status.value})
+    return Ok({"terminal_status": "COMPLETED", "action": action, "observation_id": obs_id})
+
+
 def run_live_slice(store: Store, session_id: str, instruction: str,
                    target_path: str, content: str,
-                   provider, max_turns: int = 12,
+                   provider, max_turns: int = 24,
                    transcript_path: str | None = None) -> dict:
-    """Drive the frozen vertical slice end to end. Returns the full transcript
-    plus final canonical state. Halts with ok=False on any terminal failure —
-    never papers over a rejection, never salvages prose."""
+    """Drive the frozen Cognition membrane on a multi-step plan, in dependency
+    order. Halts with ok=False on any terminal failure — never papers over a
+    rejection, never salvages prose.
+
+    Loop discipline: each plan Step must receive its Action, reach terminal
+    OBSERVED state, be independently verified, and complete BEFORE the next
+    dependent Step may be proposed. "depend_on" goes first (topological sort
+    of the committed plan graph).
+    """
     events: list[TurnEvent] = []
 
     def ev(turn, stage, kind, detail):
         events.append(TurnEvent(turn, stage, kind, detail))
 
-    # trusted host wiring — session identity comes only from here, never the
-    # model (§13.2/§1c)
     cognition.bind_store(store)
     auth = cognition.authenticate_session(session_id)
     if isinstance(auth, Rejected):
@@ -425,7 +512,8 @@ def run_live_slice(store: Store, session_id: str, instruction: str,
 
     schemas = tool_schemas()
     state: dict[str, Any] = {"goal": None, "task": None, "plan": None,
-                             "step": None, "action": None, "verifications": []}
+                             "steps": [], "ordered_steps": [], "step_idx": 0,
+                             "actions": {}, "verifications": []}
 
     contents: list[dict] = [{
         "role": "user",
@@ -434,11 +522,15 @@ def run_live_slice(store: Store, session_id: str, instruction: str,
             "emit exactly ONE function call per turn using the tool that is offered; never emit "
             "free text. Use ONLY ids and revision numbers returned by previous tool responses — "
             "never invent, guess, truncate, or compute them. Payload rules: completion_policy is "
-            "{\"rule\": \"ALL_REQUIRED\"}; the plan has exactly one step; the step's "
-            "execution_capability and every verification requirement's applies_to_capability are "
-            "\"file_write\"; the verification method is \"verify_file_write\"; "
-            f"the action arguments are exactly {{\"path\": {json.dumps(target_path)}, "
-            f"\"content\": {json.dumps(content)}}}. Instruction: {instruction}"
+            "{\"rule\": \"ALL_REQUIRED\"}; propose_plan carries one StepProposal per step the "
+            "instruction needs — for this milestone exactly TWO: first the file_write step, then "
+            "the file_read step, with the read step's depends_on_index [0]; each step's "
+            "execution_capability must match its capability (file_write or file_read), and each "
+            "step's verification_requirements must name verify_file_write for file_write steps "
+            "and verify_file_read for file_read steps, with applies_to_capability matching the "
+            "step's capability. file_write arguments: {\"path\", \"content\"}; file_read "
+            f"arguments: {{\"path\"}}. Target path: {json.dumps(target_path)}, "
+            f"content to write: {json.dumps(content)}. Instruction: {instruction}"
         )}],
     }]
 
@@ -447,8 +539,17 @@ def run_live_slice(store: Store, session_id: str, instruction: str,
     rejections = 0
     halted_reason: str | None = None
     turn = 0
+    done = False
+    drive_failure: Rejected | None = None
 
-    while turn < max_turns and state["action"] is None:
+    def current_step():
+        """The step the loop is currently accepting an Action for (in
+        dependency order), or None if we're not in the action stage."""
+        if stage != "action" or state["step_idx"] >= len(state["ordered_steps"]):
+            return None
+        return state["ordered_steps"][state["step_idx"]]
+
+    while turn < max_turns and not done:
         turn += 1
         resp = provider.call(contents,
                              [schemas[n] for n in STAGE_TOOLS[stage]],
@@ -461,8 +562,6 @@ def run_live_slice(store: Store, session_id: str, instruction: str,
         texts = [p.text for p in parts if getattr(p, "text", None)]
 
         if not calls:
-            # §21: narration is not a proposal. Discard outright, re-prompt
-            # once, then halt cleanly. The text is never JSON-scraped.
             ev(turn, stage, "narration_discarded", {"text": "".join(texts)[:500]})
             reprompts += 1
             if reprompts > 1:
@@ -474,21 +573,16 @@ def run_live_slice(store: Store, session_id: str, instruction: str,
                 "Emit exactly one tool call now."}]})
             continue
 
-        # §0/§1a: ONLY the genuine tool-call arguments reach the adapter —
-        # serialized as {operation: name, **args}; the prose is dropped above.
         raw = json.dumps({"proposals": [
             {"operation": fc.name, **_as_dict_args(fc.args)} for fc in calls
         ]})
         ev(turn, stage, "tool_call", {"calls": [{"operation": fc.name,
-                                                 "args": _as_dict_args(fc.args)} for fc in calls]})
+                                                 "args": _as_dict_args(fc.args)}
+                                                for fc in calls]})
 
-        parcels = []
-        for fc in calls:
-            parcels.append({"name": fc.name, "args": _as_dict_args(fc.args),
-                            "_call_id": f"call_{fc.name}"})
-        contents.append({"role": "model", "parts": [
-            {"function_call": p} for p in parcels
-        ]})
+        parcels = [{"name": fc.name, "args": _as_dict_args(fc.args),
+                    "_call_id": f"call_{fc.name}"} for fc in calls]
+        contents.append({"role": "model", "parts": [{"function_call": p} for p in parcels]})
 
         parsed = cognition.parse_proposals(raw)
         if isinstance(parsed, Rejected):
@@ -496,7 +590,8 @@ def run_live_slice(store: Store, session_id: str, instruction: str,
             payload = _result_payload(parsed)
             ev(turn, stage, "result", {"operation": None, **payload})
             contents.append({"role": "user", "parts": [
-                {"function_response": {"name": calls[0].name, "_call_id": f"call_{calls[0].name}",
+                {"function_response": {"name": calls[0].name,
+                                       "_call_id": f"call_{calls[0].name}",
                                        "response": payload}}
             ]})
             if rejections > 4:
@@ -504,12 +599,6 @@ def run_live_slice(store: Store, session_id: str, instruction: str,
                 break
             continue
 
-        # Stage-gating enforcement: only the exposed tool may dispatch this
-        # turn. The frozen membrane independently rejects genuinely out-of-
-        # order calls, but propose_goal is always legal (a fresh goal) — so the
-        # loop must refuse to dispatch anything but the single exposed tool,
-        # else a confused model could mint unlimited goals. Off-stage calls are
-        # discarded like narration: fed back as a rejection and re-prompted.
         on_stage = [c for c in calls if c.name in STAGE_TOOLS[stage]]
         off_stage = [c for c in calls if c.name not in STAGE_TOOLS[stage]]
         if off_stage:
@@ -539,23 +628,37 @@ def run_live_slice(store: Store, session_id: str, instruction: str,
         turn_failed = False
         turn_payloads: list[tuple[str, dict]] = []
         for op in parsed.value:
+            # stage==action needs the model to target the RIGHT step in
+            # dependency order — an action for a later step is off-spec
+            # (wrong-order attempt): inform the model which step is next
+            # and tell it to resend with that step id.
+            if op.operation == "propose_action" and stage == "action":
+                expected = current_step()
+                if expected is not None and op.payload.get("step_id") != expected.id:
+                    payload = {"status": "rejected", "reason": "WRONG_STEP_ORDER",
+                               "detail": f"next step in dependency order is "
+                                         f"{expected.id} ({expected.execution_capability}); "
+                                         "propose that step's action first",
+                               "current": {"step_id": expected.id,
+                                           "capability": expected.execution_capability,
+                                           "revision": expected.revision}}
+                    ev(turn, stage, "result", {"operation": op.operation, **payload})
+                    turn_payloads.append((op.operation, payload))
+                    turn_failed = True   # not a membrane rejection — a host-rule correction
+                    continue
             res = cognition.dispatch(op)
             payload = _result_payload(res)
-            # uniform event detail: {"operation": <name|None>, "status": ...,
-            # "reason"/"detail"/"current" for rejections, "result" for ok}
             ev(turn, stage, "result", {"operation": op.operation, **payload})
             turn_payloads.append((op.operation, payload))
             if isinstance(res, Rejected):
                 turn_failed = True
                 continue
 
-            # advance the chain using the real returned objects
             if op.operation == "propose_goal":
                 state["goal"] = res.value
                 stage = "task"
             elif op.operation == "propose_task":
                 state["task"] = res.value
-                # host lifecycle glue (same transitions the e2e test uses)
                 state["task"] = work.transition_object(
                     store, state["task"].id, TaskStatus.ACTIVE, state["task"].revision).value
                 ev(turn, stage, "host_step", {"op": "activate_task",
@@ -564,8 +667,11 @@ def run_live_slice(store: Store, session_id: str, instruction: str,
                 stage = "plan"
             elif op.operation == "propose_plan":
                 state["plan"] = res.value["plan"]
-                state["step"] = res.value["steps"][0]
+                state["steps"] = res.value["steps"]
                 state["verifications"] = res.value["bound_verifications"]
+                state["ordered_steps"] = _dependency_order(
+                    state["steps"], state["plan"].dependency_graph)
+                state["step_idx"] = 0
                 act = work.activate_plan(
                     store, state["task"].id, state["plan"].id,
                     work.load_task(store.read(), state["task"].id).revision)
@@ -576,15 +682,12 @@ def run_live_slice(store: Store, session_id: str, instruction: str,
                     continue
                 state["task"] = act.value
                 ev(turn, stage, "host_step", {"op": "activate_plan",
-                                              "plan_id": state["plan"].id})
+                                              "plan_id": state["plan"].id,
+                                              "ordered_steps": [s.id for s in state["ordered_steps"]]})
                 stage = "action"
             elif op.operation == "propose_action":
-                state["action"] = res.value
+                state["actions"][state["ordered_steps"][state["step_idx"]].id] = res.value
 
-        # feed each dispatch's structured result back so the next turn can use
-        # the real ids/revisions inside it (§25 provenance — never invented;
-        # note functions are keyed by the DISPATCHED ops — when same-emission
-        # dedup collapsed calls, only the surviving op got a payoff)
         if turn_payloads:
             contents.append({"role": "user", "parts": [
                 {"function_response": {"name": op_name, "_call_id": f"call_{op_name}",
@@ -592,57 +695,52 @@ def run_live_slice(store: Store, session_id: str, instruction: str,
                 for (op_name, payload) in turn_payloads
             ]})
 
+        # ── drive the just-accepted action for the CURRENT step, then advance
+        # to the next step in dependency order. With the action committed to
+        # PENDING, the host (not the model) executes it and drives the step to
+        # terminal. If the drive fails, the run halts with the failure detail
+        # instead of partially ordering.
+        if stage == "action" and not turn_failed:
+            cur = state["ordered_steps"][state["step_idx"]]
+            action = state["actions"].get(cur.id)
+            if action is not None:
+                drive = _drive_step(store, state["plan"], state["task"], cur, action,
+                                    state["verifications"], ev, turn)
+                if isinstance(drive, Rejected):
+                    drive_failure = drive
+                    break
+                if drive.value["terminal_status"] != "COMPLETED":
+                    drive_failure = Rejected("STEP_NOT_COMPLETED",
+                                             f"step {cur.id} ended in "
+                                             f"{drive.value['terminal_status']} not COMPLETED", None)
+                    break
+                state["step_idx"] += 1
+                if state["step_idx"] >= len(state["ordered_steps"]):
+                    done = True
+
         if turn_failed:
             rejections += 1
             if rejections > 4:
                 halted_reason = "too many membrane rejections"
                 break
 
-    if state["action"] is None:
-        return {"ok": False, "reason": halted_reason or "ran out of turns",
-                "events": [asdict(e) for e in events]}
+    if not done or drive_failure is not None:
+        reason = (drive_failure.reason if drive_failure else None) or halted_reason or "ran out of turns"
+        return {"ok": False, "reason": reason, "events": [asdict(e) for e in events]}
 
-    # ── host drives the existing execution boundary (no model involved) ─────
-    action = state["action"]
-    ok_req, rej = _caps.execute_action(store, action, _caps.get("file_write"),
-                                       safety_check=make_confirmation_gate(required=False),
-                                       plan_id_for_validation=state["plan"].id)
-    ev(turn, "execute", "host_step",
-       {"op": "execute_action",
-        "result": _result_payload(ok_req) if ok_req is not None else _result_payload(rej)})
-    if rej is not None:
-        return {"ok": False, "reason": f"execution rejected: {rej.reason}",
-                "events": [asdict(e) for e in events]}
-
-    # evidence + independent verification (Emission Is Not Occurrence gate)
-    evi = evidence.record_runtime_evidence(
-        store, ok_req.value["observation_id"], source="file_write",
-        relevance_to=state["task"].id,
-        content={"action_id": action.id}).value
-    ev(turn, "execute", "host_step", {"op": "record_runtime_evidence", "evidence_id": evi.id})
-    for binding in state["verifications"]:
-        vr = verification.run_method_for_action(store, binding["verification_id"], action.id)
-        ev(turn, "verify", "host_step",
-           {"operation": "verify_file_write", "verification_id": binding["verification_id"],
-            "result": _result_payload(vr)})
-
-    # step + task completion through Work Service
-    s = work.load_step(store.read(), state["step"].id)
-    s = work.transition_object(store, s.id, StepStatus.READY, s.revision).value
-    s = work.transition_object(store, s.id, StepStatus.EXECUTING, s.revision).value
-    work.complete_step(store, s.id, s.revision)
-    s = work.load_step(store.read(), state["step"].id)
-    ev(turn, "complete", "host_step", {"op": "complete_step", "status": s.status.value})
+    # task completion — only reachable after ALL steps are verified+COMPLETED
     t = work.load_task(store.read(), state["task"].id)
     cr = work.complete_object(store, t.id, t.revision)
     ev(turn, "complete", "host_step", {"op": "complete_object(task)",
                                        "result": _result_payload(cr)})
 
-    file_bytes = None
     import pathlib
     p = pathlib.Path(target_path)
-    if p.exists() and p.is_file():
-        file_bytes = p.read_text(encoding="utf-8")
+    file_bytes = p.read_text(encoding="utf-8") if (p.exists() and p.is_file()) else None
+
+    step_statuses = {}
+    for st in state["steps"]:
+        step_statuses[st.id] = work.load_step(store.read(), st.id).status.value
 
     transcript = {
         "ok": isinstance(cr, Ok) and cr.value["object"].status == TaskStatus.COMPLETED,
@@ -652,7 +750,7 @@ def run_live_slice(store: Store, session_id: str, instruction: str,
             "file_bytes_match": file_bytes == content,
             "task_status": (cr.value["object"].status.value if isinstance(cr, Ok)
                             else getattr(cr, "reason", "REJECTED")),
-            "step_status": s.status.value,
+            "step_statuses": step_statuses,
         },
         "provider": getattr(provider, "model_name", type(provider).__name__),
     }

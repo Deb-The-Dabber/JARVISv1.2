@@ -579,3 +579,61 @@ proposes" and "code that commits".
 field, unknown field, hallucinated id, identity injection, wrong-capability,
 narration-only, same-turn duplicates, offline chain, plus real-transcript
 artifact at `artifacts/live_slice_transcript.json`).
+
+## 29. Live Loop v2 — capability generalization + N-step drive (2026-09-26)
+
+**scope**: the model now drives a real two-step Plan (file_write, then
+file_read dependent on it) end-to-end; a second capability was added to prove
+the architecture generalizes beyond file_write.
+
+**Decisions recorded**:
+
+- **file_read idempotency class**: `IDEMPOTENT`. The capability has NO external
+  side effect — re-running reads is trivially safe and the same request
+  produces the same state. (The class exists to protect *external* effects
+  on retry; a pure query has none. NOT marking it CONDITIONALLY_IDEMPOTENT —
+  that implies a relevant side effect key, which reads don't have.)
+- **verify_file_read independence**: the evaluator reads the ACTION's path
+  from its committed arguments, and the Observation row's claimed
+  `content` from the committed observation — then *re-reads the real
+  filesystem itself* and compares claimed-bytes against actual-bytes. This
+  mirrors verify_file_write's shape (request vs ground truth) but the truth
+  side for a reading capability is the file's CURRENT contents and the claim
+  side is the Observation's self-report. A capability that fabricates its
+  read content (test: replace file_read's execute with a liar reporting
+  "Goodbye World" while the file holds "Hello World") fails this check —
+  the Observation cannot self-certify.
+- **Dependency-order drive**: `_dependency_order` walks the committed
+  plan's `dependency_graph` in Kahn topological order; `_drive_step`
+  executes/observes/verifies/completes ONE step and the loop only advances
+  `step_idx` when the previous step's terminal completion has landed. An
+  Action for a later step proposing out of order is wrong-turn garbage —
+  the loop feeds the model a `WRONG_STEP_ORDER` rejection telling it which
+  step is actually next.
+- **Foundation immutability confirmed**: nothing in `begin_executing`,
+  `create_action`, or `create_plan_with_steps` needed changing to support a
+  dependent second step — Law 13's acyclicity check at plan commit plus the
+  per-step drive order suffice. The wrong-order adversarial test is satisfied
+  by existing checks (FAILED + ACTION_NOT_EXECUTED + COMPLETION_POLICY_UNSATISFIED),
+  no new gate was added.
+- **What did NOT need changing**: `v5/capabilities/__init__.py` file_write
+  untouched; `v5/verification.py` only gained a new registration (no change
+  to verify_file_write); no State Foundation schema change; the milestone is
+  genuinely membrane+new-modules.
+
+**Test coverage**: `tests/test_live_loop_v2.py` — 12 tests: registration
+shape, FAILED-not-OBSERVED on missing file, wrong capability for the read
+step, missing/wrong-type/extra argument rejection at both adapter
+(MALFORMED_PROPOSAL) and authority (CAPABILITY_ARGS_INVALID) layers,
+out-of-order Step-2 attempt caught by the existing gates, the
+**fabricated-Observation sabotage test** (capability claims wrong content,
+independent verifier reads the real file → FAIL), file deletion after honest
+read → FAIL, wrong-path retry succeeds through a new Action identity, and
+the full offline two-step slice through the generalized loop machinery.
+
+**Live proof**: real NIM (`nemotron-3-super-120b-a12b`, temp 0, native
+OpenAI-style function calling) end-to-end run in
+`artifacts/live_slice_v2_transcript.json`. Model proposed the two-step plan;
+the stale-task-recovery path fired on turn 3 (expected_task_revision=0 →
+rejected), the model reread the state and re-proposed on turn 4 with the
+current revision (1) — §45 correct. Both steps completed observably.

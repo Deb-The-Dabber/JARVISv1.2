@@ -115,6 +115,62 @@ register(CapabilitySpec(
 ))
 
 
+# ── file_read ───────────────────────────────────────────────────────────────
+# A query, not a mutation: zero external side effect. Verification still
+# matters — a capability could CLAIM to read content it never read, and the
+# fabricate-vs-truth gap is the whole point of the milestone. The capability
+# reports what it observed (or not-found); it never claims "correct".
+
+def _file_read_validate_args(args: dict) -> str | None:
+    if not isinstance(args, dict):
+        return "arguments must be an object"
+    allowed = {"path"}
+    unknown = sorted(set(args) - allowed)
+    if unknown:
+        return f"unknown argument field(s): {', '.join(unknown)}"
+    path = args.get("path")
+    if path is None:
+        return "path is required"
+    if not isinstance(path, str) or not path.strip():
+        return "path must be a non-empty string"
+    if len(path) > 4096:
+        return "path exceeds 4096 chars"
+    return None
+
+
+def _file_read(args: dict) -> dict:
+    path = args.get("path")
+    if not path:
+        raise DefiniteNoEffect("missing required argument: path")
+    if not isinstance(path, str):
+        raise DefiniteNoEffect("path must be a string")
+    p = pathlib.Path(path).expanduser().resolve()
+    if not p.is_absolute():
+        raise DefiniteNoEffect("path must be absolute")
+    if not p.exists():
+        # definite no-effect: the file provably does not exist, so the Action
+        # FAILED rather than UNKNOWN_OUTCOME. The result reports the truth.
+        raise DefiniteNoEffect(f"file does not exist: {p}")
+    if not p.is_file():
+        raise DefiniteNoEffect(f"not a regular file: {p}")
+    content = p.read_text(encoding="utf-8")
+    return {
+        "path": str(p),
+        "found": True,
+        "content": content,
+        "bytes_read": len(content.encode("utf-8")),
+    }
+
+
+register(CapabilitySpec(
+    name="file_read",
+    idempotency_class=IdempotencyClass.IDEMPOTENT,  # read-only: no effect at all
+    requires_confirmation=False,                       # read-only, no mutation
+    execute=_file_read,
+    validate_args=_file_read_validate_args,
+))
+
+
 # ── the executor: the single place that runs capabilities ──────────────────
 
 def execute_action(store: Store, action, capability: CapabilitySpec,
