@@ -637,3 +637,77 @@ OpenAI-style function calling) end-to-end run in
 the stale-task-recovery path fired on turn 3 (expected_task_revision=0 →
 rejected), the model reread the state and re-proposed on turn 4 with the
 current revision (1) — §45 correct. Both steps completed observably.
+
+## 30. Confirmation gate wired into the live Cognition Loop (2026-09-27)
+
+**The gap closed**: `v5/live_loop.py` hardcoded `make_confirmation_gate(required=False)`
+at the execution drive, silently disabling confirmation the capability specs
+demand (file_write registers `requires_confirmation=True` — the v1/v2 live
+runs executed writes through a gate that was told confirmation was not
+required). No safety primitive was missing: `v5/safety.py` and the
+execution-boundary gate were already hardened and independently audited;
+only the live-loop integration was absent.
+
+**Decisions recorded**:
+
+- **Registry stays the source of truth**: `_drive_step` now derives the gate
+  requirement from `CapabilitySpec.requires_confirmation` of the Action's
+  registered capability. The execution-time gate (inside `begin_executing`'s
+  atomic boundary) remains the sole authority. No confirmation logic was
+  duplicated in `live_loop.py`.
+- **Blocked-attempt-then-confirm flow**: for a confirmation-requiring
+  capability, the first execution attempt genuinely happens unconfirmed and
+  is rejected by the gate (nothing is written — PENDING unchanged); the
+  block is recorded in the transcript; only then does the host confirmation
+  flow run, and execution is retried. The transcript therefore carries the
+  full proof sequence: blocked → granted → executed.
+- **Host-side confirmation is host code**: `_stage_and_confirm` is the
+  deterministic human-approval simulation for proofs — it uses ONLY the
+  existing Law 32 mechanism (`create_confirmation` bound to exact identity +
+  revision + capability + arguments, then `confirm`). `confirmation_policy`
+  is an injectable host callback (a real deployment substitutes an
+  interactive prompt); the model has no operation that reaches it, and
+  model-supplied `confirmed`/`confirmation_id` fields are rejected as
+  unknown fields at the adapter before anything dispatches.
+- **`file_delete` capability** (exists solely to exercise this boundary):
+  IDEMPOTENT (same request → same end state: absent), `requires_confirmation
+  =True`, strict `{"path"}`-only argument schema, repo-root self-protection
+  guard mirrored from file_write, `DefiniteNoEffect` for missing/non-file
+  targets, FileNotFoundError race handled as definite-no-effect.
+- **`verify_file_delete` independence**: the evaluator loads the target from
+  the Action's canonical arguments and inspects the LIVE filesystem itself;
+  PASS only when the target is absent. It does not trust the capability's
+  return value, Action status, Observation, or any model claim — the
+  sabotage test proves a lying capability (reports deleted, file untouched)
+  FAILs verification. "Target existed before" is a harness precondition of
+  the deletion flow (the capability refuses missing targets), not something
+  the verifier could establish from the past filesystem.
+- **Behavior change for existing capabilities**: file_write now genuinely
+  requires confirmation in live-loop runs (its spec always said so). The
+  v1/v2 offline loop tests pass unchanged because the default host policy
+  stages+confirms deterministically — their final-state assertions are
+  untouched; their transcripts now additionally contain the blocked/granted
+  events, which is the honest record.
+
+**Tests**: `tests/test_confirmation_gate.py` (22 tests) — A unconfirmed
+blocked (nothing written, PENDING, target intact); B retry/rephrase/new-Action
+all blocked + same-emission dedup; C fabricated confirmation (model-supplied
+`confirmed`/`confirmation_id` rejected as unknown fields, prose approval is
+not a proposal, a confirmed row for a different Action authorizes nothing);
+D wrong-Action reuse (confirmed A never authorizes B; the pointed-binding
+variant also rejected on the Law 32 arguments check); E arguments/capability
+mis-staging never authorizes; F revision binding (staged-for-N rejected at
+N+1 after a legitimate repair-bumped revision); G full lifecycle after
+genuine confirmation; live-loop integration (block→grant→execute ordering,
+refusing policy fails honestly, stage-only policy stays blocked — staging
+without `confirm()` authorizes nothing, non-confirmation capability
+file_read unchanged, no confirmation events); capability registration
+shape; repo guard; verifier sabotage test.
+
+**Live proof**: `artifacts/live_slice_delete_transcript.json` — real NIM
+(nemotron-3-super-120b-a12b, temperature 0, native function calling) drove
+"Delete this temporary test file." end to end: propose_goal → propose_task →
+propose_plan (with a genuine STALE_REVISION recovery) → propose_action(file_
+delete) → PENDING → execution_blocked CONFIRMATION_REQUIRED → host
+confirmation cfm_01M3J9579D8XP1G380N4139QPK → OBSERVED → verify_file_delete
+PASS → Step COMPLETED → Task COMPLETED → target absent on disk.

@@ -175,6 +175,53 @@ register_method(VerificationMethodSpec(
 ))
 
 
+# ── verify_file_delete: independent absence-of-target check ──────────────────
+# The verifier does NOT trust the capability's return value, the Action status,
+# the Observation, or any model claim. It loads the target path from the
+# Action's canonical arguments and inspects the LIVE filesystem itself:
+# PASS only when the target is actually gone; the target still existing is
+# FAIL. (That the target existed before execution is a harness precondition
+# of the deletion flow — the capability refuses to run on a missing file via
+# DefiniteNoEffect, so an OBSERVED deletion only happens for a real target.)
+
+def _make_verify_file_delete_evaluator(store: Store, action_id: str):
+    """Evaluator factory for verify_file_delete.
+
+    PASS  = independent filesystem inspection finds the target absent,
+    FAIL  = the target still exists (deletion not established — this is what
+            catches a sabotaged capability that reports success without
+            deleting),
+    None  = INCONCLUSIVE (the verifier itself could not inspect)."""
+    row = store.read().execute(
+        "SELECT arguments FROM actions WHERE id = ?", (action_id,)
+    ).fetchone()
+    expected_args = None
+    if row is not None:
+        import json as _json
+        expected_args = _json.loads(row["arguments"])
+
+    def evaluate(claim_row, evidence_rows) -> bool | None:
+        if expected_args is None:
+            return None
+        path_raw = expected_args.get("path")
+        if not isinstance(path_raw, str) or not path_raw:
+            return None
+        path = pathlib.Path(path_raw).expanduser().resolve()
+        try:
+            return not path.exists()
+        except OSError:
+            return None  # genuinely inconclusive — verifier could not inspect
+
+    return evaluate
+
+
+register_method(VerificationMethodSpec(
+    name="verify_file_delete",
+    applies_to_capability="file_delete",
+    make_evaluator=_make_verify_file_delete_evaluator,
+))
+
+
 def run_method_for_action(store: Store, verification_id: str, action_id: str):
     """Resolve a requirement-bound Verification's registered method and run it
     through the established run_verification path against a specific executed

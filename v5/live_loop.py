@@ -49,11 +49,11 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from v5 import capabilities as _caps
-from v5 import cognition, evidence, execution, sessions, verification, work
+from v5 import cognition, evidence, execution, safety, sessions, verification, work
 from v5.cognition import _OPERATION_FIELDS, _STEP_OPTIONAL, _STEP_REQUIRED, _VR_OPTIONAL, _VR_REQUIRED
 from v5.enums import StepStatus, TaskStatus, VerificationResult
-from v5.models import Ok, Rejected, Result
-from v5.safety import make_confirmation_gate
+from v5.models import (Ok, Rejected, Result, R_CONFIRMATION_REQUIRED)
+from v5.safety import confirm, create_confirmation, make_confirmation_gate
 from v5.store import Store
 
 # The milestone's single fixed instruction and its parameters (§40 vertical
@@ -428,16 +428,69 @@ def _dependency_order(steps, dependency_graph) -> list:
     return order
 
 
-def _drive_step(store, plan, task, step, action, bindings, ev, turn):
+def _stage_and_confirm(store: Store, action) -> Result:
+    """Default host-side confirmation flow — the deterministic simulation of
+    human approval for the live proof. It uses ONLY the existing Law 32
+    mechanism: stage a binding for the EXACT action identity + revision +
+    capability + arguments, then confirm it. This is host code, explicitly
+    separate from Cognition: the model has no operation that reaches it, and
+    nothing in the proposal payload can influence it. A real deployment
+    replaces this callback with an interactive human prompt; the
+    confirmation_policy parameter exists precisely so that substitution is
+    injectable without touching the loop."""
+    staged = create_confirmation(store, action.id, action.revision,
+                                 action.capability, action.arguments)
+    if isinstance(staged, Rejected):
+        return staged
+    confirmed = confirm(store, staged.value)
+    if isinstance(confirmed, Rejected):
+        return confirmed
+    return Ok({"confirmation_id": staged.value})
+
+
+def _drive_step(store, plan, task, step, action, bindings, ev, turn,
+                confirmation_policy=None):
     """Drive ONE step through the existing boundary, in the same transaction
     shape the single-step v1 code had: execute → OBSERVED → evidence → the
     step's OWN verifications (bound at plan commit, filtered to this step id)
     → READY → EXECUTING → COMPLETED. A verification failure, execution
-    rejection, or observation gap halts the run (none are papered over)."""
-    ok_req, rej = _caps.execute_action(
-        store, action, _caps.get(action.capability),
-        safety_check=make_confirmation_gate(required=False),
-        plan_id_for_validation=plan.id)
+    rejection, or observation gap halts the run (none are papered over).
+
+    Confirmation wiring (Law 21/32/33): the gate requirement is derived from
+    the registered capability spec — the registry is the source of truth and
+    the execution-time gate stays authoritative. For a confirmation-requiring
+    capability the FIRST execution attempt happens unconfirmed and is
+    rejected by the gate inside begin_executing's atomic boundary (nothing
+    is written); the block is recorded, the host-side confirmation flow runs,
+    and only then is execution retried. The model cannot reach the
+    confirmation flow — it is host code invoked between turns."""
+    spec = _caps.get(action.capability)
+    required = bool(spec.requires_confirmation) if spec is not None else False
+    safety_check = make_confirmation_gate(required=required)
+
+    def _attempt():
+        return _caps.execute_action(
+            store, action, spec,
+            safety_check=safety_check,
+            plan_id_for_validation=plan.id)
+
+    ok_req, rej = _attempt()
+    if rej is not None and required and rej.reason == R_CONFIRMATION_REQUIRED:
+        # the gate genuinely blocked the unconfirmed attempt — record it, then
+        # run the host/human confirmation path and retry once.
+        ev(turn, "confirm", "host_step",
+           {"op": "execution_blocked", "action_id": action.id,
+            "reason": rej.reason, "detail": rej.detail})
+        decision = (confirmation_policy or _stage_and_confirm)(store, action)
+        if isinstance(decision, Rejected):
+            ev(turn, "confirm", "host_step",
+               {"op": "confirmation_refused", "action_id": action.id,
+                "reason": decision.reason, "detail": decision.detail})
+            return Rejected(decision.reason, decision.detail, decision.current)
+        ev(turn, "confirm", "host_step",
+           {"op": "confirmation_granted", "action_id": action.id,
+            "result": _result_payload(decision)})
+        ok_req, rej = _attempt()
     if rej is not None:
         ev(turn, "execute", "host_step",
            {"op": "execute_action", "step_id": step.id, "action_id": action.id,
@@ -490,7 +543,9 @@ def _drive_step(store, plan, task, step, action, bindings, ev, turn):
 def run_live_slice(store: Store, session_id: str, instruction: str,
                    target_path: str, content: str,
                    provider, max_turns: int = 24,
-                   transcript_path: str | None = None) -> dict:
+                   transcript_path: str | None = None,
+                   plan_guidance: str | None = None,
+                   confirmation_policy=None) -> dict:
     """Drive the frozen Cognition membrane on a multi-step plan, in dependency
     order. Halts with ok=False on any terminal failure — never papers over a
     rejection, never salvages prose.
@@ -499,7 +554,16 @@ def run_live_slice(store: Store, session_id: str, instruction: str,
     OBSERVED state, be independently verified, and complete BEFORE the next
     dependent Step may be proposed. "depend_on" goes first (topological sort
     of the committed plan graph).
-    """
+
+    `plan_guidance` replaces the default (write-then-read) milestone text in
+    the model-facing prompt — it is presentation only; every rule it states is
+    independently enforced by the membrane.
+
+    `confirmation_policy(store, action) -> Result` is the host-side human
+    approval flow for confirmation-requiring capabilities. The default
+    (_stage_and_confirm) is the deterministic simulation used by the live
+    proofs; a real deployment substitutes an interactive prompt here. It is
+    host code: the model has no operation that reaches it."""
     events: list[TurnEvent] = []
 
     def ev(turn, stage, kind, detail):
@@ -515,6 +579,18 @@ def run_live_slice(store: Store, session_id: str, instruction: str,
                              "steps": [], "ordered_steps": [], "step_idx": 0,
                              "actions": {}, "verifications": []}
 
+    guidance = plan_guidance or (
+        "propose_plan carries one StepProposal per step the instruction "
+        "needs — for this milestone exactly TWO: first the file_write step, then "
+        "the file_read step, with the read step's depends_on_index [0]; each step's "
+        "execution_capability must match its capability (file_write or file_read), and each "
+        "step's verification_requirements must name verify_file_write for file_write steps "
+        "and verify_file_read for file_read steps, with applies_to_capability matching the "
+        "step's capability. file_write arguments: {\"path\", \"content\"}; file_read "
+        f"arguments: {{\"path\"}}. Target path: {json.dumps(target_path)}, "
+        f"content to write: {json.dumps(content)}"
+    )
+
     contents: list[dict] = [{
         "role": "user",
         "parts": [{"text": (
@@ -522,15 +598,7 @@ def run_live_slice(store: Store, session_id: str, instruction: str,
             "emit exactly ONE function call per turn using the tool that is offered; never emit "
             "free text. Use ONLY ids and revision numbers returned by previous tool responses — "
             "never invent, guess, truncate, or compute them. Payload rules: completion_policy is "
-            "{\"rule\": \"ALL_REQUIRED\"}; propose_plan carries one StepProposal per step the "
-            "instruction needs — for this milestone exactly TWO: first the file_write step, then "
-            "the file_read step, with the read step's depends_on_index [0]; each step's "
-            "execution_capability must match its capability (file_write or file_read), and each "
-            "step's verification_requirements must name verify_file_write for file_write steps "
-            "and verify_file_read for file_read steps, with applies_to_capability matching the "
-            "step's capability. file_write arguments: {\"path\", \"content\"}; file_read "
-            f"arguments: {{\"path\"}}. Target path: {json.dumps(target_path)}, "
-            f"content to write: {json.dumps(content)}. Instruction: {instruction}"
+            "{\"rule\": \"ALL_REQUIRED\"}; " + guidance + f". Instruction: {instruction}"
         )}],
     }]
 
@@ -705,7 +773,8 @@ def run_live_slice(store: Store, session_id: str, instruction: str,
             action = state["actions"].get(cur.id)
             if action is not None:
                 drive = _drive_step(store, state["plan"], state["task"], cur, action,
-                                    state["verifications"], ev, turn)
+                                    state["verifications"], ev, turn,
+                                    confirmation_policy=confirmation_policy)
                 if isinstance(drive, Rejected):
                     drive_failure = drive
                     break
