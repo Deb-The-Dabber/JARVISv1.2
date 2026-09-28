@@ -711,3 +711,75 @@ propose_plan (with a genuine STALE_REVISION recovery) → propose_action(file_
 delete) → PENDING → execution_blocked CONFIRMATION_REQUIRED → host
 confirmation cfm_01M3J9579D8XP1G380N4139QPK → OBSERVED → verify_file_delete
 PASS → Step COMPLETED → Task COMPLETED → target absent on disk.
+
+## 31. Minimal interactive terminal adapter (2026-09-27)
+
+**Scope**: `v5/terminal.py` (the thin adapter), `scripts/run_interactive.py`
+(the entry point), `tests/test_terminal.py`. No foundational file changed;
+`v5/live_loop.py` needed zero modification — the terminal is purely additive
+around the existing seams.
+
+**Decisions recorded**:
+
+- **Ownership boundary**: the terminal owns ONLY terminal input (three
+  separate channels: normal requests, local commands, confirmation
+  decisions), local commands (/help, /debug, /quit — never entering the live
+  loop), rendering, and the confirmation PROMPT. All JARVIS semantics stay
+  in the existing loop/membrane.
+- **One request = one `run_live_slice` turn**: each user input is one
+  live-loop turn through the frozen membrane; one process = one live V5
+  session (`sessions.create_session`), reused across turns. No second
+  session store or dispatcher exists.
+- **Confirmation pause/resume uses the DECISIONS #30 seam**: the terminal
+  passes an interactive `confirmation_policy`; the loop calls it when its
+  gate blocks, the policy renders CONFIRMATION_REQUIRED + a safe action
+  summary, reads the human decision, and approval flows through the
+  EXISTING mechanism (`safety.create_confirmation` + `safety.confirm`). The
+  loop then retries the SAME Action — turn, Action identity, revision,
+  arguments, and verification binding are preserved by construction, and no
+  duplicate Goal/Task/Plan/Action is created (proven by canonical-state
+  assertions in tests and the live smoke). The human decision is terminal
+  input, never a new Cognition turn: model-call count is asserted unchanged
+  across the confirmation.
+- **Lazy provider construction**: local commands and EOF never build the
+  provider, so they work with no credentials (fully offline). The provider
+  initializes on the first request; an initialization failure there is
+  FATAL with exit 1 (§12's unrecoverable-initialization class), while
+  request-time failures (including provider HTTP errors) are rendered as
+  handled ERRORs and the session continues (exit 0 at clean termination).
+- **Exact multiline protocol**: `<<EOF` alone on its line begins; `END`
+  alone on its line terminates; markers excluded; blank lines/whitespace
+  preserved; body joined with \n and submitted as exactly one request;
+  empty body ignored (not submitted); EOF mid-body discards the incomplete
+  request and exits 0. Commands are recognized ONLY at the normal prompt
+  (exact line match); inside a body they are literal content; at a
+  confirmation prompt anything but y/yes is a denial.
+- **Exit statuses**: 0 for /quit, EOF (normal, multiline-discard,
+  confirmation-not-approved), handled request failures, denial; 1 only for
+  unrecoverable terminal/runtime failure (provider init, infrastructure).
+- **Secret safety**: all error paths render through `redact_secrets`
+  (environment values whose names match KEY/TOKEN/SECRET/PASSWORD are
+  masked); confirmation summaries and debug events carry no payloads or
+  credentials; debug output is real transcript events (kind/op/status/
+  reason codes only), never fabricated narration.
+- **Store location**: interactive runs default to `~/.jarvis_v5/state.db`
+  (`JARVIS_V5_DB` override; `JARVIS_ENV_FILE` for the dotenv credential
+  file per the repository's existing script convention).
+
+**Tests**: `tests/test_terminal.py` (39 tests) — basics (help/debug/quit/
+unknown command/empty input), reader semantics (exact lines, whitespace
+submission, sequential no-read-ahead across confirmation, EOF), the full
+multiline matrix, run() and REAL process exit codes (including FATAL exit 1
+via a sanitized-env subprocess), error rendering (native rejection codes,
+execution failure, verification failure, sanitized exceptions), debug mode
+(real events, no secrets), and the confirmation lifecycle (approval:
+same-Action/no-duplicates/OBSERVED/one Observation/verification PASS/
+COMPLETED; denial: PENDING/no Observation/file intact/no confirmed rows;
+EOF: cannot approve; commands-at-confirmation = denial). Suite: 201 -> 240.
+
+**Live smoke (real NIM provider, real script)**: write turn with real
+confirmation pause + approval (file created); read-back turn completed;
+delete denied (file intact) then approved (file gone) in one session;
+confirmation EOF (NOT APPROVED, file intact); exact multiline submission
+(file written); /help, /debug, /quit, plain EOF all exit 0; transient
+provider 500s rendered as handled ERRORs with session continuation.
