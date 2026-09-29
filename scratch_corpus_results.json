@@ -1,0 +1,328 @@
+[
+  {
+    "input": "hello",
+    "calls_this_input": 6,
+    "ok": false,
+    "termination_reason": "CONFIRMATION_DECLINED",
+    "tools_called_in_order": [
+      "propose_goal",
+      "propose_task",
+      "propose_plan",
+      "propose_plan",
+      "propose_action"
+    ],
+    "action_proposal": {
+      "capability": "file_write",
+      "arguments": {
+        "path": "/hello",
+        "content": "hello"
+      },
+      "step_id": "step_01M3QN6HE0PPR7FGJFDYZA727D"
+    },
+    "rejection_reasons": [
+      "STALE_REVISION"
+    ],
+    "confirmation_pause": true,
+    "executed": false,
+    "canonical_row_counts": {
+      "goals": 1,
+      "tasks": 1,
+      "plans": 1,
+      "steps": 1,
+      "actions": 1,
+      "confirmations": 0,
+      "observations": 0
+    }
+  },
+  {
+    "input": "hello jarvis",
+    "calls_this_input": 7,
+    "ok": false,
+    "termination_reason": "too many membrane rejections",
+    "tools_called_in_order": [
+      "propose_goal",
+      "propose_task",
+      "propose_plan",
+      "propose_plan",
+      "propose_plan",
+      "propose_plan",
+      "propose_plan"
+    ],
+    "action_proposal": null,
+    "rejection_reasons": [
+      "MALFORMED_PROPOSAL",
+      "NOT_FOUND",
+      "NOT_FOUND",
+      "NOT_FOUND",
+      "NOT_FOUND"
+    ],
+    "confirmation_pause": false,
+    "executed": false,
+    "canonical_row_counts": {
+      "goals": 1,
+      "tasks": 1,
+      "plans": 0,
+      "steps": 0,
+      "actions": 0,
+      "confirmations": 0,
+      "observations": 0
+    }
+  },
+  {
+    "input": "hey",
+    "calls_this_input": 6,
+    "ok": false,
+    "termination_reason": "CONFIRMATION_DECLINED",
+    "tools_called_in_order": [
+      "propose_goal",
+      "propose_task",
+      "propose_plan",
+      "propose_plan",
+      "propose_plan",
+      "propose_action"
+    ],
+    "action_proposal": {
+      "capability": "file_write",
+      "arguments": {
+        "path": "/hey",
+        "content": "hey"
+      },
+      "step_id": "step_01M3QND1QQSV9AX3V0YBH207MQ"
+    },
+    "rejection_reasons": [
+      "MALFORMED_PROPOSAL",
+      "STALE_REVISION"
+    ],
+    "confirmation_pause": true,
+    "executed": false,
+    "canonical_row_counts": {
+      "goals": 1,
+      "tasks": 1,
+      "plans": 1,
+      "steps": 1,
+      "actions": 1,
+      "confirmations": 0,
+      "observations": 0
+    }
+  },
+  {
+    "input": "how are you",
+    "calls_this_input": 6,
+    "ok": false,
+    "termination_reason": "CONFIRMATION_DECLINED",
+    "tools_called_in_order": [
+      "propose_goal",
+      "propose_task",
+      "propose_plan",
+      "propose_plan",
+      "propose_plan",
+      "propose_action"
+    ],
+    "action_proposal": {
+      "capability": "file_write",
+      "arguments": {
+        "path": "/tmp/response.txt",
+        "content": "I'm functioning normally, thank you!"
+      },
+      "step_id": "step_01M3QNF8MJCXPSET864W6KNAC9"
+    },
+    "rejection_reasons": [
+      "MALFORMED_PROPOSAL",
+      "STALE_REVISION"
+    ],
+    "confirmation_pause": true,
+    "executed": false,
+    "canonical_row_counts": {
+      "goals": 1,
+      "tasks": 1,
+      "plans": 1,
+      "steps": 2,
+      "actions": 1,
+      "confirmations": 0,
+      "observations": 0
+    }
+  },
+  {
+    "input": "who are you",
+    "calls_this_input": 2,
+    "ok": false,
+    "termination_reason": "model narrated twice without a tool call \u2014 halted",
+    "tools_called_in_order": [],
+    "action_proposal": null,
+    "rejection_reasons": [],
+    "confirmation_pause": false,
+    "executed": false,
+    "canonical_row_counts": {
+      "goals": 0,
+      "tasks": 0,
+      "plans": 0,
+      "steps": 0,
+      "actions": 0,
+      "confirmations": 0,
+      "observations": 0
+    }
+  },
+  {
+    "input": "what can you do",
+    "calls_this_input": 3,
+    "ok": false,
+    "termination_reason": "model narrated twice without a tool call \u2014 halted",
+    "tools_called_in_order": [
+      "propose_goal"
+    ],
+    "action_proposal": null,
+    "rejection_reasons": [],
+    "confirmation_pause": false,
+    "executed": false,
+    "canonical_row_counts": {
+      "goals": 1,
+      "tasks": 0,
+      "plans": 0,
+      "steps": 0,
+      "actions": 0,
+      "confirmations": 0,
+      "observations": 0
+    }
+  },
+  {
+    "input": "thanks",
+    "calls_this_input": 5,
+    "ok": false,
+    "termination_reason": "CONFIRMATION_DECLINED",
+    "tools_called_in_order": [
+      "propose_goal",
+      "propose_task",
+      "propose_plan",
+      "propose_plan",
+      "propose_action"
+    ],
+    "action_proposal": {
+      "capability": "file_write",
+      "arguments": {
+        "path": "/thanks.txt",
+        "content": "thanks"
+      },
+      "step_id": "step_01M3QNMTQTZ1BR4EWGHNGQCM5G"
+    },
+    "rejection_reasons": [
+      "STALE_REVISION"
+    ],
+    "confirmation_pause": true,
+    "executed": false,
+    "canonical_row_counts": {
+      "goals": 1,
+      "tasks": 1,
+      "plans": 1,
+      "steps": 1,
+      "actions": 1,
+      "confirmations": 0,
+      "observations": 0
+    }
+  },
+  {
+    "input": "what's the weather?",
+    "calls_this_input": 6,
+    "ok": false,
+    "termination_reason": "CONFIRMATION_DECLINED",
+    "tools_called_in_order": [
+      "propose_goal",
+      "propose_task",
+      "propose_plan",
+      "propose_plan",
+      "propose_plan",
+      "propose_action"
+    ],
+    "action_proposal": {
+      "capability": "file_write",
+      "arguments": {
+        "path": "/tmp/weather.txt",
+        "content": "The weather is currently unknown."
+      },
+      "step_id": "step_01M3QNQNV53FTZDMYBR1XAVMJ4"
+    },
+    "rejection_reasons": [
+      "MALFORMED_PROPOSAL",
+      "STALE_REVISION"
+    ],
+    "confirmation_pause": true,
+    "executed": false,
+    "canonical_row_counts": {
+      "goals": 1,
+      "tasks": 1,
+      "plans": 1,
+      "steps": 1,
+      "actions": 1,
+      "confirmations": 0,
+      "observations": 0
+    }
+  },
+  {
+    "input": "write \"hello\" to test.txt",
+    "calls_this_input": 5,
+    "ok": false,
+    "termination_reason": "CONFIRMATION_DECLINED",
+    "tools_called_in_order": [
+      "propose_goal",
+      "propose_task",
+      "propose_plan",
+      "propose_plan",
+      "propose_action"
+    ],
+    "action_proposal": {
+      "capability": "file_write",
+      "arguments": {
+        "path": "/test.txt",
+        "content": "hello"
+      },
+      "step_id": "step_01M3QNRXHJ752VCQE8VHAEY87V"
+    },
+    "rejection_reasons": [
+      "STALE_REVISION"
+    ],
+    "confirmation_pause": true,
+    "executed": false,
+    "canonical_row_counts": {
+      "goals": 1,
+      "tasks": 1,
+      "plans": 1,
+      "steps": 1,
+      "actions": 1,
+      "confirmations": 0,
+      "observations": 0
+    }
+  },
+  {
+    "input": "delete test.txt",
+    "calls_this_input": 5,
+    "ok": false,
+    "termination_reason": "CONFIRMATION_DECLINED",
+    "tools_called_in_order": [
+      "propose_goal",
+      "propose_task",
+      "propose_plan",
+      "propose_plan",
+      "propose_action"
+    ],
+    "action_proposal": {
+      "capability": "file_delete",
+      "arguments": {
+        "path": "/test.txt"
+      },
+      "step_id": "step_01M3QNTDNPNB77ZJAZ1PWDG7F7"
+    },
+    "rejection_reasons": [
+      "STALE_REVISION"
+    ],
+    "confirmation_pause": true,
+    "executed": false,
+    "canonical_row_counts": {
+      "goals": 1,
+      "tasks": 1,
+      "plans": 1,
+      "steps": 1,
+      "actions": 1,
+      "confirmations": 0,
+      "observations": 0
+    }
+  }
+]
