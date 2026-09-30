@@ -272,7 +272,10 @@ class TestInputReader:
         term, out = make_terminal(store, session, p, ["write it", "y", "/quit"])
         assert term.run() == 0
         assert term.requests == 1
-        assert p.calls == 4                    # goal, task, plan, action — nothing more
+        # 5 = classify (conversational boundary) + goal/task/plan/action.
+        # The guarded invariant is unchanged: the CONFIRMATION itself added
+        # zero model requests.
+        assert p.calls == 5
         assert "EOF: closing.\n" not in out    # /quit was consumed as a command
 
     def test_normal_eof_exits_zero(self, store, session, tmp_path):
@@ -562,7 +565,9 @@ class TestConfirmationApproval:
 
         # no extra model request was issued for the confirmation
         assert term.requests == 1
-        assert p.calls == 4           # goal, task, plan, action — nothing more
+        # 5 = classify (conversational boundary) + goal/task/plan/action —
+        # the confirmation itself still added zero model requests.
+        assert p.calls == 5
         assert "DECLINED" not in joined
         assert joined.count("OK: Task COMPLETED\n") == 1   # no duplicate result render
 

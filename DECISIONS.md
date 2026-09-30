@@ -783,3 +783,74 @@ delete denied (file intact) then approved (file gone) in one session;
 confirmation EOF (NOT APPROVED, file intact); exact multiline submission
 (file written); /help, /debug, /quit, plain EOF all exit 0; transient
 provider 500s rendered as handled ERRORs with session continuation.
+
+## 32. Conversational Boundary v1 — host-layer classification (2026-09-28)
+
+**Scope**: implements exactly Option A of
+`INVESTIGATION_conversational_boundary.md` §4 (audit/conversational-boundary
+@ e85ed77). New host module `v5/conversation.py` + wiring in the terminal's
+`submit` path. No foundational file changed; `v5/cognition.py`,
+`v5/live_loop.py`, and both frozen contracts are byte-identical to
+interactive-terminal-v1 @ 90a86a6.
+
+**Decisions recorded**:
+
+- **The boundary is the mirror image of the confirmation gate**: a
+  proceed/not-proceed decision made OUTSIDE the frozen mutation surface by
+  host code, gating whether the Work pipeline *starts* (where the
+  confirmation gate governs whether an effect *proceeds*). It lives upstream
+  of `run_live_slice`; the work path is byte-for-byte unchanged.
+- **classify tool is host-owned**: a single `classify {kind:
+  work|conversation}` function-calling schema living in `v5/conversation.py`,
+  deliberately NOT added to `cognition._OPERATION_FIELDS` — the frozen
+  four-function surface stays four functions. A structural test enforces
+  that the module imports nothing from the Cognition module and performs no
+  Work mutation or store write.
+- **Fail-safe direction is enforced inside classify_request, not the
+  caller**: any exception (provider timeouts raise), missing tool call,
+  unparseable args, or out-of-enum kind → kind="work" → today's behavior.
+  The boundary degrades to the status quo, never to silence. The corpus
+  re-run exercised this live: three transient NIM 500s on the classify call
+  fell back to work exactly as designed (honest ERROR, exit 0, no bypass).
+- **Conversational replies carry a mechanical claim guard**: the reply
+  prompt forbids Work-completion claims, and `reply_has_work_claim`
+  enforces it mechanically (first-person perfective claims, "done
+  it/that", bare "done!" as a reply). A tripping reply is replaced by an
+  honest canned line — prompt instruction alone is not trusted. Reply
+  generation failure renders an honest unavailable line under the
+  conversational prefix — NEVER routed to the work path (that would
+  recreate the pollution) and never rendered as ERROR (conversation is not
+  a failure).
+- **Rendering contract**: replies render under a distinct `jarvis: `
+  prefix, never through the Work-result paths (OK:/ERROR:/CONFIRMATION_/
+  REQUIRED/DECLINED/NOT APPROVED). Tests pin every collision.
+- **Known cost (named, not resolved)**: every terminal request now pays one
+  extra classification call; conversational turns additionally pay one
+  reply call but no longer pay 4-7 loop calls + canonical pollution. The
+  investigation explicitly deferred caching/collapsing the classification
+  into the loop's prompt — that re-raises the Option-B spirit question and
+  is out of scope.
+
+**Tests**: `tests/test_conversational_boundary.py` (24 tests) — structural
+import boundary; the exact 8+2 corpus routing with zero-row/zero-loop-call
+assertions; fail-safe (exception/timeout/garbage/no-tool-call → work, both
+through the terminal and as direct unit checks); prompt-injection both
+directions at the WORST CASE (classifier complies) proving annoyance-only
+outcomes; the rendering contract incl. claim-guard replacement; mixed
+conversation+work sessions. Two existing provider-call-count assertions in
+test_terminal.py were updated 4→5 to account for the new upstream classify
+call — the guarded invariant (the confirmation itself adds zero model
+requests) is unchanged.
+
+**Live corpus proof** (`artifacts/conversational_boundary_corpus_rerun.json`,
+real NIM provider, real terminal): all 8 conversational inputs →
+conversation, ZERO canonical rows (before: 34 rows of nonsense Work), real
+natural replies — including "what's the weather?" now answered honestly ("I
+don't have live weather data at hand") instead of the original fabricated
+file_write of invented weather content. Both work inputs → work (gate-paused),
+byte-identical behavior to the original investigation (full chain, CONFIRM
+ATION_REQUIRED, declined via piped /quit, exit 0). Transient NIM 500s on
+three classify calls exercised the fail-safe live: fallback→work, honest
+ERROR, exit 0 — retried inputs then classified conversation cleanly.
+
+Suite: 240 -> 264 passed.

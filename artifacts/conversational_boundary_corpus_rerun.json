@@ -1,0 +1,172 @@
+[
+  {
+    "input": "hello",
+    "exit_code": 0,
+    "classification_outcome": "conversation",
+    "conversational_reply": "Hello! How can I assist you today?",
+    "gate_paused": false,
+    "canonical_row_counts": {
+      "goals": 0,
+      "tasks": 0,
+      "plans": 0,
+      "steps": 0,
+      "actions": 0,
+      "confirmations": 0,
+      "observations": 0
+    },
+    "stdout_excerpt": "JARVIS V5 interactive terminal \u2014 /help for commands.\njarvis> jarvis: Hello! How can I assist you today?\njarvis> "
+  },
+  {
+    "input": "hello jarvis",
+    "exit_code": 0,
+    "classification_outcome": "conversation",
+    "conversational_reply": "Hello! How can I assist you today?",
+    "gate_paused": false,
+    "canonical_row_counts": {
+      "goals": 0,
+      "tasks": 0,
+      "plans": 0,
+      "steps": 0,
+      "actions": 0,
+      "confirmations": 0,
+      "observations": 0
+    },
+    "stdout_excerpt": "JARVIS V5 interactive terminal \u2014 /help for commands.\njarvis> jarvis: Hello! How can I assist you today?\njarvis> "
+  },
+  {
+    "input": "hey",
+    "exit_code": 0,
+    "classification_outcome": "conversation",
+    "conversational_reply": "Hey there! How can I help you today?",
+    "gate_paused": false,
+    "canonical_row_counts": {
+      "goals": 0,
+      "tasks": 0,
+      "plans": 0,
+      "steps": 0,
+      "actions": 0,
+      "confirmations": 0,
+      "observations": 0
+    },
+    "stdout_excerpt": "JARVIS V5 interactive terminal \u2014 /help for commands.\njarvis> jarvis: Hey there! How can I help you today?\njarvis> "
+  },
+  {
+    "input": "how are you",
+    "exit_code": 0,
+    "classification_outcome": "conversation",
+    "conversational_reply": "I'm functioning well, thank you. How can I assist you today?",
+    "gate_paused": false,
+    "canonical_row_counts": {
+      "goals": 0,
+      "tasks": 0,
+      "plans": 0,
+      "steps": 0,
+      "actions": 0,
+      "confirmations": 0,
+      "observations": 0
+    },
+    "stdout_excerpt": "JARVIS V5 interactive terminal \u2014 /help for commands.\njarvis> jarvis: I'm functioning well, thank you. How can I assist you today?\njarvis> "
+  },
+  {
+    "input": "who are you",
+    "exit_code": 0,
+    "classification_outcome": "conversation",
+    "conversational_reply": "I\u2019m JARVIS, your AI assistant. How can I help you today?",
+    "gate_paused": false,
+    "canonical_row_counts": {
+      "goals": 0,
+      "tasks": 0,
+      "plans": 0,
+      "steps": 0,
+      "actions": 0,
+      "confirmations": 0,
+      "observations": 0
+    },
+    "stdout_excerpt": "JARVIS V5 interactive terminal \u2014 /help for commands.\njarvis> jarvis: I\u2019m JARVIS, your AI assistant. How can I help you today?\njarvis> "
+  },
+  {
+    "input": "what can you do",
+    "exit_code": 0,
+    "classification_outcome": "conversation",
+    "conversational_reply": "I\u2019m here to chat, answer questions, share information, brainstorm ideas, or help you think through things. If you have a specific task in mind, just let me know and we can set it up as a work request. What\u2019s on your mind?",
+    "gate_paused": false,
+    "canonical_row_counts": {
+      "goals": 0,
+      "tasks": 0,
+      "plans": 0,
+      "steps": 0,
+      "actions": 0,
+      "confirmations": 0,
+      "observations": 0
+    },
+    "stdout_excerpt": "JARVIS V5 interactive terminal \u2014 /help for commands.\njarvis> jarvis: I\u2019m here to chat, answer questions, share information, brainstorm ideas, or help you think through things. If you have a specific task in mind, just let me know and we can set it up as a work request. What\u2019s on your mind?\njarvis> "
+  },
+  {
+    "input": "thanks",
+    "exit_code": 0,
+    "classification_outcome": "conversation",
+    "conversational_reply": "You're welcome! If you need anything else, just let me know.",
+    "gate_paused": false,
+    "canonical_row_counts": {
+      "goals": 0,
+      "tasks": 0,
+      "plans": 0,
+      "steps": 0,
+      "actions": 0,
+      "confirmations": 0,
+      "observations": 0
+    },
+    "stdout_excerpt": "JARVIS V5 interactive terminal \u2014 /help for commands.\njarvis> jarvis: You're welcome! If you need anything else, just let me know.\njarvis> "
+  },
+  {
+    "input": "what's the weather?",
+    "exit_code": 0,
+    "classification_outcome": "conversation",
+    "conversational_reply": "I don\u2019t have live weather data at hand, but I can set up a task to look it up for you if you\u2019d like. Just let me know!",
+    "gate_paused": false,
+    "canonical_row_counts": {
+      "goals": 0,
+      "tasks": 0,
+      "plans": 0,
+      "steps": 0,
+      "actions": 0,
+      "confirmations": 0,
+      "observations": 0
+    },
+    "stdout_excerpt": "JARVIS V5 interactive terminal \u2014 /help for commands.\njarvis> jarvis: I don\u2019t have live weather data at hand, but I can set up a task to look it up for you if you\u2019d like. Just let me know!\njarvis> "
+  },
+  {
+    "input": "write \"hello\" to test.txt",
+    "exit_code": 0,
+    "classification_outcome": "work (gate-paused)",
+    "conversational_reply": null,
+    "gate_paused": true,
+    "canonical_row_counts": {
+      "goals": 1,
+      "tasks": 1,
+      "plans": 1,
+      "steps": 1,
+      "actions": 1,
+      "confirmations": 0,
+      "observations": 0
+    },
+    "stdout_excerpt": "JARVIS V5 interactive terminal \u2014 /help for commands.\njarvis> CONFIRMATION_REQUIRED\naction: file_write {\"content\": \"hello\", \"path\": \"/test.txt\"}\nConfirm action? [y/N]: DECLINED: action was not approved; nothing was executed.\njarvis> EOF: closing.\n"
+  },
+  {
+    "input": "delete test.txt",
+    "exit_code": 0,
+    "classification_outcome": "work (gate-paused)",
+    "conversational_reply": null,
+    "gate_paused": true,
+    "canonical_row_counts": {
+      "goals": 1,
+      "tasks": 1,
+      "plans": 1,
+      "steps": 1,
+      "actions": 1,
+      "confirmations": 0,
+      "observations": 0
+    },
+    "stdout_excerpt": "JARVIS V5 interactive terminal \u2014 /help for commands.\njarvis> CONFIRMATION_REQUIRED\naction: file_delete {\"path\": \"/test.txt\"}\nConfirm action? [y/N]: DECLINED: action was not approved; nothing was executed.\njarvis> EOF: closing.\n"
+  }
+]

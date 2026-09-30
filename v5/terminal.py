@@ -43,7 +43,7 @@ import re
 import sys
 from typing import Callable
 
-from v5 import live_loop, safety
+from v5 import conversation, live_loop, safety
 from v5.models import Ok, Rejected, Result
 from v5.store import Store
 
@@ -57,6 +57,7 @@ EOF_EXIT_MSG = "EOF: closing.\n"
 MULTILINE_EOF_MSG = "EOF: incomplete multiline request discarded.\n"
 NOT_APPROVED_MSG = "NOT APPROVED: pending action was not approved.\n"
 DECLINED_MSG = "DECLINED: action was not approved; nothing was executed.\n"
+CONVERSATION_PREFIX = "jarvis: "
 
 HELP_TEXT = """\
 Commands:
@@ -148,6 +149,7 @@ class InteractiveTerminal:
         self._emit = output_fn or _stdout
         self.debug = debug
         self.requests = 0          # live-loop submissions made (test surface)
+        self.conversational_turns = 0  # conversation-classified turns (test surface)
         self.model_calls = 0       # provider invocations observed (test surface)
 
     # ── rendering helpers ────────────────────────────────────────────────────
@@ -235,11 +237,35 @@ class InteractiveTerminal:
         return True
 
     def submit(self, instruction: str):
-        """Run ONE live-loop turn. Returns None to continue the session, or an
-        int exit status (0 = confirmation-EOF exit; 1 = fatal). JARVIS request
-        failures are rendered and the session continues."""
+        """Run ONE turn. Conversational input (per the conversational
+        boundary) is answered directly and never reaches the Work pipeline;
+        work input runs ONE live-loop turn exactly as before this boundary
+        existed. Returns None to continue the session, or an int exit status
+        (0 = confirmation-EOF exit; 1 = fatal). JARVIS request failures are
+        rendered and the session continues."""
         if not self._ensure_provider():
             return 1
+
+        # ── conversational boundary (Option A): classify BEFORE the pipeline.
+        # Any classifier failure falls back to "work" inside classify_request
+        # itself — the fail-safe direction is enforced there, not here.
+        verdict = conversation.classify_request(
+            self._store, self._session.id, instruction, self._provider)
+        kind = verdict.value.get("kind", "work") if isinstance(verdict, Ok) else "work"
+        if self.debug:
+            fallback = verdict.value.get("fallback") if isinstance(verdict, Ok) else None
+            self._emit(f"[debug] classify: {kind}"
+                       + (" (fallback to work)" if fallback else "") + "\n")
+        if kind == "conversation":
+            self.conversational_turns += 1
+            reply = conversation.conversation_reply(
+                self._store, self._session.id, instruction, self._provider)
+            text = reply.value.get("reply") if isinstance(reply, Ok) else None
+            self._emit(f"{CONVERSATION_PREFIX}{redact_secrets(text or '')}\n")
+            if self.debug:
+                self._emit("[debug] conversation turn complete\n")
+            return None
+
         self.requests += 1
         if self.debug:
             head = instruction if len(instruction) <= 60 else instruction[:57] + "..."
