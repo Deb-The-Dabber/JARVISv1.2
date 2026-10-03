@@ -408,18 +408,22 @@ class TestAuthorityLaws29to33:
     def test_law31_untrusted_input_is_data(self, store, tmp_path):
         """External content cannot alter canonical state: a file's content is
         data. The file_write capability refuses repo-internal writes (a
-        structural boundary), and no evidence row can mutate state."""
+        structural boundary), and no evidence row can mutate state.
+
+        Path Resolution v1: the host workspace policy now refuses an
+        out-of-workspace absolute path even EARLIER — at Action acceptance —
+        so the repo-internal write cannot even persist as a PENDING Action
+        (a strictly stronger form of the same boundary)."""
         from v5 import capabilities as caps
         goal, task, plan, step = make_goal_task_plan_step(store)
         task = activated(store, task, plan)
         repo_file = "v5/__init__.py"
-        action = pending_action(store, step, args={"path": os_path(repo_file), "content": "evil"})
-        from v5.safety import make_confirmation_gate
-        ok, rej = caps.execute_action(store, action, caps.get("file_write"),
-                                      safety_check=make_confirmation_gate(required=False),
-                                      plan_id_for_validation=plan.id)
-        # the capability's guard made the attempt FAIL definitively (no effect)
-        assert rej is None and ok.value["status"] == "FAILED"
+        r = execution_create_action(store, step, args={"path": os_path(repo_file),
+                                                        "content": "evil"})
+        assert isinstance(r, Rejected) and r.reason == "CAPABILITY_ARGS_INVALID"
+        assert "outside the JARVIS workspace" in r.detail
+        # nothing was persisted and the capability was never given a chance
+        assert store.read().execute("SELECT COUNT(*) n FROM actions").fetchone()["n"] == 0
 
     def test_law32_confirmation_binding(self, store, tmp_path):
         from v5.safety import confirm, create_confirmation, make_confirmation_gate
@@ -519,3 +523,11 @@ class TestMetaLaws34to36:
 def os_path(rel):
     import os
     return os.path.abspath(rel)
+
+
+def execution_create_action(store, step, args):
+    """Direct authoritative Action-acceptance call for boundary tests."""
+    from v5 import capabilities as caps
+    from v5 import execution
+    return execution.create_action(store, step.id, "file_write", args,
+                                   caps.get("file_write").idempotency_class)

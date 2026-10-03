@@ -971,3 +971,72 @@ still reaches Cognition and the confirmation gate; fail-safe preserved
 (broken classifier on an ambiguous input still falls to work); the
 claim-guard still replaces completion claims for the pretend-completed
 adversarial. Real-provider corpus results recorded in the milestone report.
+
+## 35. Path Resolution / Workspace v1 (2026-10-02)
+
+**Scope**: a host-owned workspace/path-resolution layer so ordinary relative
+paths and bare filenames resolve safely and deterministically to a writable
+JARVIS workspace, instead of the model inventing absolute paths
+("/helloworld.txt" → macOS read-only root → UNKNOWN_OUTCOME).
+
+**Decisions recorded**:
+
+- **Workspace**: `~/.jarvis_v5/workspace` (overridable via
+  `JARVIS_V5_WORKSPACE`). Chosen from repository conventions: `~/.jarvis_v5/`
+  already holds the durable `state.db`, sits outside the V5 repo (so the
+  existing repo self-protection guard stays meaningful), is user-writable,
+  stable across invocations, and cwd-independent. Created at terminal
+  startup (`run_interactive.py`); resolution itself is side-effect-free.
+- **Where resolution occurs — the capability/path boundary, per the frozen
+  architecture**: `v5/paths.py` (new module) is applied independently at
+  three host points: (1) each capability's `validate_args` (proposal time —
+  native early rejection through the existing MALFORMED_PROPOSAL /
+  CAPABILITY_ARGS_INVALID conventions); (2) capability execution (the
+  resolved target is the one actually touched and recorded in the
+  Observation); (3) the registered verifiers, which resolve the Action's
+  CANONICAL args themselves and never trust the capability's self-report
+  (verification independence preserved).
+- **Canonical Action arguments keep the model's literal path** ("helloworld.txt"):
+  auditability (args = what was asked), deterministic replay (same literal +
+  same policy → same target), and Law-32 confirmation binding stay intact.
+  The resolved target is displayed at confirmation time (rendering-only
+  "target:" line; the binding itself is unchanged).
+- **Absolute-path policy**: an absolute path is preserved only if it is
+  already inside the workspace (a re-pasted resolved target is exactly what
+  the relative form resolves to — nothing is silently rewritten); absolute
+  paths OUTSIDE the workspace are natively rejected at proposal validation
+  with a clear reason, which the loop feeds back as ordinary proposal
+  feedback. This is the deliberate v1 restriction: it is explicit, tested,
+  and removes the root-cause failure (invented root paths) rather than
+  hiding the error.
+- **Traversal**: containment-checked against the fully realpath'd target —
+  `../` chains that stay inside are normalized and allowed; anything that
+  escapes is natively rejected. **Symlinks**: the final target is resolved
+  with realpath before containment, so `workspace/link -> /outside` cannot
+  smuggle an escape; symlink chains that stay inside the workspace remain
+  usable. Empty/whitespace/NUL/non-string/oversize paths and the workspace
+  root itself are natively rejected.
+- **The prompt is NOT the boundary**: the guidance was updated to tell the
+  model relative paths are safe (so it stops inventing absolute ones), but
+  the host resolver enforces the policy regardless of what the model emits —
+  proven by the adversarial test where the model still proposes
+  "/helloworld.txt" and receives a native rejection (no OS error, no
+  UNKNOWN_OUTCOME).
+- **Test integration**: an autouse fixture points
+  `JARVIS_V5_WORKSPACE` at each test's `tmp_path` — every pre-existing
+  absolute tmp_path target is then inside-workspace (preserved policy), so
+  the existing suites run unmodified; the few literal "/tmp/..." call sites
+  and the Law-31 repo-guard test were narrowly updated (the guard now fires
+  even earlier, at Action acceptance — a strictly stronger form of the same
+  boundary; the test asserts the stronger behavior).
+
+**Tests**: `tests/test_workspace_paths.py` (44) — resolution matrix (bare/
+relative/./ /nested/absolute-in/absolute-out/traversal×3/NUL/empty/oversize/
+root/~/determinism/env-override/symlink-in/symlink-escape/creation opt-in);
+capability integration for all three file capabilities; verifier
+independence (workspace-relative PASS, wrong-bytes FAIL, missing FAIL,
+policy-rejected INCONCLUSIVE, file_read LIE-observation FAIL, file_delete
+present/absent); end-to-end helloworld flow through the real terminal with
+confirmation target rendering + exact-byte verification + verifier PASS;
+denial still prevents execution; model-invented absolute path → native
+rejection, no OS error. Suite: 302 -> 346 passed.

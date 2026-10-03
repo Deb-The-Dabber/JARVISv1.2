@@ -26,6 +26,9 @@ from v5 import live_loop, sessions
 
 def main() -> int:
     workdir = pathlib.Path(tempfile.mkdtemp(prefix="jarvis_live_slice_"))
+    # Path Resolution v1: this script's absolute tmp targets are inside this
+    # workspace, so the host policy preserves them.
+    os.environ.setdefault("JARVIS_V5_WORKSPACE", str(workdir))
     target = str(workdir / "foo.txt")
     content = "Hello World"
     instruction = f"Create foo.txt containing Hello World."

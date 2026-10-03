@@ -20,10 +20,10 @@ result — this module provides evaluators, never a result-writing shortcut.
 """
 from __future__ import annotations
 
-import pathlib
 from dataclasses import dataclass
 from typing import Callable
 
+from v5 import paths as _paths
 from v5.store import Store
 
 
@@ -83,7 +83,13 @@ def _make_verify_file_write_evaluator(store: Store, action_id: str):
         content = expected.get("content", "")
         if not isinstance(path_raw, str) or not isinstance(content, str):
             return None
-        path = pathlib.Path(path_raw).expanduser().resolve()
+        # Path Resolution v1: the verifier resolves the canonical args
+        # through the SAME host policy — never the capability's self-report.
+        # A policy-rejected path is INCONCLUSIVE here (nothing executed for
+        # the verifier to inspect).
+        path, path_err = _paths.resolve_workspace_path(path_raw)
+        if path_err is not None:
+            return None
         try:
             if not path.exists():
                 return False
@@ -154,7 +160,10 @@ def _make_verify_file_read_evaluator(store: Store, action_id: str):
             # capability did not actually report a content claim — a
             # claim-less observation cannot prove anything
             return False
-        path = pathlib.Path(path_raw).expanduser().resolve()
+        # Path Resolution v1: independent resolution via the host policy
+        path, path_err = _paths.resolve_workspace_path(path_raw)
+        if path_err is not None:
+            return None
         try:
             if not path.exists():
                 return False
@@ -206,7 +215,10 @@ def _make_verify_file_delete_evaluator(store: Store, action_id: str):
         path_raw = expected_args.get("path")
         if not isinstance(path_raw, str) or not path_raw:
             return None
-        path = pathlib.Path(path_raw).expanduser().resolve()
+        # Path Resolution v1: independent resolution via the host policy
+        path, path_err = _paths.resolve_workspace_path(path_raw)
+        if path_err is not None:
+            return None
         try:
             return not path.exists()
         except OSError:

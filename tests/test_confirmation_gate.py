@@ -548,7 +548,7 @@ class TestFileDeleteRegistration:
         assert spec.validate_args({}) is not None
         assert spec.validate_args({"path": "/tmp/x", "extra": 1}) is not None
         assert spec.validate_args({"path": 42}) is not None
-        assert spec.validate_args({"path": "/tmp/x"}) is None
+        assert spec.validate_args({"path": "x"}) is None
         from v5.verification import get_method, registered_methods
         assert get_method("verify_file_delete") is not None
         assert "verify_file_delete" in registered_methods()

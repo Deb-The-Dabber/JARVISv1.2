@@ -326,7 +326,7 @@ class TestCapabilityCorrespondence:
     def test_action_capability_mismatch_rejected(self, store, session):
         """§46 — Step declares file_write; Action proposes delete_file is
         rejected; no Action created; Step unchanged; nothing executes."""
-        target = "/tmp/del_me.txt"
+        target = "del_me.txt"
         _, task, plan, step, _, _ = _propose_chain(store, session, target, "data")
         before = store.read().execute("SELECT COUNT(*) n FROM actions").fetchone()["n"]
         r = cognition.propose_action(step.id, step.revision, "delete_file",
@@ -345,7 +345,7 @@ class TestCapabilityCorrespondence:
             return real(args)
         monkeypatch.setattr(caps.get("file_write"), "execute", counting)
 
-        target = "/tmp/persisted_only.txt"
+        target = "persisted_only.txt"
         _, task, plan, step, action, ver = _propose_chain(store, session, target, "abc")
         assert calls["n"] == 0           # propose_action did NOT execute
         assert execution.load_observation(store, action.id) is None
@@ -353,8 +353,10 @@ class TestCapabilityCorrespondence:
                                       safety_check=make_confirmation_gate(required=False),
                                       plan_id_for_validation=plan.id)
         assert rej is None and calls["n"] == 1   # execution boundary invoked it
+        # Path Resolution v1: a bare filename lands in the canonical workspace
         import pathlib
-        assert pathlib.Path(target).read_text() == "abc"
+        from v5 import paths
+        assert (paths.workspace_root() / target).read_text() == "abc"
 
 
 # ═══ §34/§35/§47/§48 — verification independence + fabrication closure ═══════

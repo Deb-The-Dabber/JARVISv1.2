@@ -7,6 +7,16 @@ from v5.models import CompletionPolicy, RetryBudget
 from v5.store import Store
 
 
+@pytest.fixture(autouse=True)
+def _jarvis_workspace(tmp_path, monkeypatch):
+    """Path Resolution v1: point the canonical JARVIS workspace at this
+    test's tmp_path. Two effects: (a) every existing absolute tmp_path
+    target is 'inside the workspace' and therefore preserved unchanged by
+    the host policy; (b) relative-path resolution lands in tmp_path. No
+    test ever touches the real ~/.jarvis_v5/workspace."""
+    monkeypatch.setenv("JARVIS_V5_WORKSPACE", str(tmp_path))
+
+
 @pytest.fixture
 def store(tmp_path):
     s = Store(str(tmp_path / "state.db"))
@@ -57,7 +67,7 @@ def pending_action(store, step, capability="file_write", args=None,
     from v5 import execution
     from v5.enums import IdempotencyClass
     r = execution.create_action(
-        store, step.id, capability, args or {"path": "/tmp/should_not_exist.txt", "content": "x"},
+        store, step.id, capability, args or {"path": "should_not_exist.txt", "content": "x"},
         idempotency_class or IdempotencyClass.IDEMPOTENT,
     )
     assert isinstance(r, Ok_type()), r

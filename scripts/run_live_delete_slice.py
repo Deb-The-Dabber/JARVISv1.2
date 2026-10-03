@@ -35,6 +35,9 @@ GUIDANCE_HEAD = (
 
 def main() -> int:
     workdir = pathlib.Path(tempfile.mkdtemp(prefix="jarvis_live_delete_"))
+    # Path Resolution v1: this script's absolute tmp targets are inside this
+    # workspace, so the host policy preserves them.
+    os.environ.setdefault("JARVIS_V5_WORKSPACE", str(workdir))
     target = workdir / "temporary_test_file.txt"
     target.write_text("temporary test content — created solely to be deleted")
     instruction = "Delete this temporary test file."

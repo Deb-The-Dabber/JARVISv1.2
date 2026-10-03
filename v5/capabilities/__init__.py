@@ -11,6 +11,7 @@ import pathlib
 from dataclasses import dataclass
 from typing import Callable
 
+from v5 import paths as _paths
 from v5.enums import IdempotencyClass
 
 
@@ -76,6 +77,11 @@ def _file_write_validate_args(args: dict) -> str | None:
         return "content must be a string"
     if isinstance(content, str) and len(content) > 1024 * 1024:
         return "content exceeds 1MiB"
+    # Path Resolution v1: host-owned workspace policy at proposal time —
+    # native early rejection instead of a later mysterious OS error
+    _, path_err = _paths.resolve_workspace_path(path)
+    if path_err is not None:
+        return path_err
     return None
 
 
@@ -86,12 +92,16 @@ def _file_write(args: dict) -> dict:
         raise DefiniteNoEffect("missing required argument: path")
     if not isinstance(content, str):
         raise DefiniteNoEffect("content must be a string")
-    p = pathlib.Path(path).expanduser()
-    if not p.is_absolute():
-        raise DefiniteNoEffect("path must be absolute")
+    # Path Resolution v1: the HOST resolves the path inside the canonical
+    # JARVIS workspace (bare/relative names resolve there; absolute paths
+    # are preserved only when already inside it). Defense in depth — the
+    # same policy already rejected invalid targets at proposal validation.
+    p, err = _paths.resolve_workspace_path(path)
+    if err is not None:
+        raise DefiniteNoEffect(err)
     # Guard: never write into the V5 repository itself (untrusted-input /
-    # self-protection boundary; tests write under tmp_path).
-    p = p.resolve()
+    # self-protection boundary; retained even though the default workspace
+    # is outside the repo, in case the workspace is configured inside it).
     repo_root = pathlib.Path(__file__).resolve().parent.parent.resolve()
     if repo_root in p.parents or p == repo_root:
         raise DefiniteNoEffect(f"refusing to write inside the V5 repo: {p}")
@@ -135,6 +145,10 @@ def _file_read_validate_args(args: dict) -> str | None:
         return "path must be a non-empty string"
     if len(path) > 4096:
         return "path exceeds 4096 chars"
+    # Path Resolution v1: host-owned workspace policy at proposal time
+    _, path_err = _paths.resolve_workspace_path(path)
+    if path_err is not None:
+        return path_err
     return None
 
 
@@ -144,9 +158,10 @@ def _file_read(args: dict) -> dict:
         raise DefiniteNoEffect("missing required argument: path")
     if not isinstance(path, str):
         raise DefiniteNoEffect("path must be a string")
-    p = pathlib.Path(path).expanduser().resolve()
-    if not p.is_absolute():
-        raise DefiniteNoEffect("path must be absolute")
+    # Path Resolution v1: resolve under the host workspace policy
+    p, err = _paths.resolve_workspace_path(path)
+    if err is not None:
+        raise DefiniteNoEffect(err)
     if not p.exists():
         # definite no-effect: the file provably does not exist, so the Action
         # FAILED rather than UNKNOWN_OUTCOME. The result reports the truth.
@@ -192,6 +207,10 @@ def _file_delete_validate_args(args: dict) -> str | None:
         return "path must be a non-empty string"
     if len(path) > 4096:
         return "path exceeds 4096 chars"
+    # Path Resolution v1: host-owned workspace policy at proposal time
+    _, path_err = _paths.resolve_workspace_path(path)
+    if path_err is not None:
+        return path_err
     return None
 
 
@@ -201,9 +220,10 @@ def _file_delete(args: dict) -> dict:
         raise DefiniteNoEffect("missing required argument: path")
     if not isinstance(path, str):
         raise DefiniteNoEffect("path must be a string")
-    p = pathlib.Path(path).expanduser().resolve()
-    if not p.is_absolute():
-        raise DefiniteNoEffect("path must be absolute")
+    # Path Resolution v1: resolve under the host workspace policy
+    p, err = _paths.resolve_workspace_path(path)
+    if err is not None:
+        raise DefiniteNoEffect(err)
     # Guard: never delete inside the V5 repository itself (the same
     # self-protection boundary file_write enforces).
     repo_root = pathlib.Path(__file__).resolve().parent.parent.resolve()

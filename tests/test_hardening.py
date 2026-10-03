@@ -54,7 +54,7 @@ class TestConfirmationRevisionBinding:
         goal, task, plan, step = make_goal_task_plan_step(store)
         task = activated(store, task, plan)
         action = pending_action(store, step, capability="file_write",
-                                args={"path": "/tmp/x.txt", "content": "y"})
+                                args={"path": "x.txt", "content": "y"})
         self._staged_and_confirmed(store, action, action.revision)
         gate = make_confirmation_gate(required=True)
         with store.read() as conn:
@@ -67,7 +67,7 @@ class TestConfirmationRevisionBinding:
         goal, task, plan, step = make_goal_task_plan_step(store)
         task = activated(store, task, plan)
         action = pending_action(store, step, capability="file_write",
-                                args={"path": "/tmp/x.txt", "content": "y"})
+                                args={"path": "x.txt", "content": "y"})
         self._staged_and_confirmed(store, action, 0)
         # legitimate revision advance on the action (repairable field change)
         auth = repair_mod.authorize("debasish")
@@ -93,7 +93,7 @@ class TestConfirmationRevisionBinding:
         task = activated(store, task, plan)
         # action created WITH the confirmation binding (specific path)
         action = pending_action(store, step, capability="file_write",
-                                args={"path": "/tmp/x.txt", "content": "y"})
+                                args={"path": "x.txt", "content": "y"})
         cfm = self._staged_and_confirmed(store, action, 0)
         auth = repair_mod.authorize("debasish")
         r = repair_mod.repair_object(store, auth, action.id, 0,
@@ -112,7 +112,7 @@ class TestConfirmationRevisionBinding:
         goal, task, plan, step = make_goal_task_plan_step(store)
         task = activated(store, task, plan)
         action = pending_action(store, step, capability="file_write",
-                                args={"path": "/tmp/x.txt", "content": "y"})
+                                args={"path": "x.txt", "content": "y"})
         self._staged_and_confirmed(store, action, 0)
         auth = repair_mod.authorize("debasish")
         repair_mod.repair_object(store, auth, action.id, 0,
@@ -261,7 +261,7 @@ class TestObligationResolutionProvenance:
         goal, task, plan, step = make_goal_task_plan_step(store)
         task = activated(store, task, plan)
         action_id, ver_id = self._executed_chain(store, step, "file_write",
-                                                 {"path": "/tmp/a.txt", "content": "x"})
+                                                 {"path": "a.txt", "content": "x"})
         obl = obligations.create_obligation(store, action_id, task.id, "unknown", "effect").value
         r = obligations.resolve_obligation(store, obl.id, ver_id, expected_revision=obl.revision)
         assert isinstance(r, Ok), r
@@ -273,9 +273,9 @@ class TestObligationResolutionProvenance:
         goal, task, plan, step = make_goal_task_plan_step(store)
         task = activated(store, task, plan)
         action_a, _ver_a = self._executed_chain(store, step, "file_write",
-                                                {"path": "/tmp/a.txt", "content": "x"})
+                                                {"path": "a.txt", "content": "x"})
         _action_b, ver_b = self._executed_chain(store, step, "file_write",
-                                                {"path": "/tmp/b.txt", "content": "y"})
+                                                {"path": "b.txt", "content": "y"})
         obl = obligations.create_obligation(store, action_a, task.id, "unknown", "effect").value
         r = obligations.resolve_obligation(store, obl.id, ver_b, expected_revision=obl.revision)
         assert isinstance(r, Rejected) and r.reason == "RESOLUTION_PROVENANCE"

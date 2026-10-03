@@ -43,7 +43,7 @@ import re
 import sys
 from typing import Callable
 
-from v5 import conversation, live_loop, safety
+from v5 import conversation, live_loop, paths, safety
 from v5.models import Ok, Rejected, Result
 from v5.store import Store
 
@@ -87,8 +87,10 @@ TERMINAL_GUIDANCE = (
     "(arguments {\"path\"}); each step's verification_requirements name the "
     "matching method (verify_file_write, verify_file_read, verify_file_delete) "
     "with applies_to_capability equal to the step's execution_capability; "
-    "later steps depend on earlier ones via depends_on_index; always use "
-    "absolute paths taken from the instruction, never paths inside the "
+    "later steps depend on earlier ones via depends_on_index; use paths "
+    "exactly as the user states them — relative paths and bare filenames "
+    "are safe because the host resolves them inside its writable JARVIS "
+    "workspace; do not invent absolute paths; never use paths inside the "
     "JARVIS repository tree"
 )
 
@@ -156,10 +158,19 @@ class InteractiveTerminal:
 
     def _render_confirmation_request(self, action) -> None:
         """CONFIRMATION_REQUIRED + a SAFE action summary (no secrets, no raw
-        payloads — arguments are the user's own declared values)."""
+        payloads — arguments are the user's own declared values).
+
+        Path Resolution v1: when the action carries a path, the RESOLVED
+        filesystem target is shown too — the user must see the actual
+        destination before approving. Rendering only: the Law-32 binding is
+        on the canonical arguments (untouched)."""
         args = redact_secrets(json.dumps(action.arguments, sort_keys=True))
         self._emit("CONFIRMATION_REQUIRED\n")
         self._emit(f"action: {action.capability} {args}\n")
+        if isinstance(action.arguments, dict) and isinstance(action.arguments.get("path"), str):
+            resolved, err = paths.resolve_workspace_path(action.arguments["path"])
+            if err is None:
+                self._emit(f"target: {resolved}\n")
         self._emit(CONFIRM_PROMPT)
 
     def _render_result(self, result: dict) -> None:
