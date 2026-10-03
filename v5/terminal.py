@@ -173,7 +173,16 @@ class InteractiveTerminal:
         elif reason == CONFIRM_EOF:
             self._emit(NOT_APPROVED_MSG)
         else:
-            self._emit(f"ERROR {reason}\n")
+            # Observability (execution-outcome v1): preserve the structured
+            # code AND the operational detail the live loop already knows —
+            # the canonical execution disposition (OBSERVED / FAILED /
+            # UNKNOWN_OUTCOME), the capability's reason, and for
+            # UNKNOWN_OUTCOME the OPEN obligation — sanitized, human-readable.
+            detail = (result.get("detail") or "").strip()
+            line = f"ERROR {reason}"
+            if detail:
+                line += f": {redact_secrets(detail)}"
+            self._emit(line + "\n")
 
     def _render_debug_events(self, result: dict) -> None:
         """Structured debug output — REAL transcript events from the actual

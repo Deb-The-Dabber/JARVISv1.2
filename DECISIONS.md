@@ -854,3 +854,61 @@ three classify calls exercised the fail-safe live: fallback→work, honest
 ERROR, exit 0 — retried inputs then classified conversation cleanly.
 
 Suite: 240 -> 264 passed.
+
+## 33. Execution Outcome Observability v1 (2026-10-01)
+
+**Scope**: the human-facing observability defect exposed by the real
+helloworld.txt terminal run (forensic audit 2026-09-30): the debug event said
+`execute_action ok` while the canonical disposition was UNKNOWN_OUTCOME, and
+the terminal rendered a bare `ERROR STEP_NOT_COMPLETED` with the underlying
+cause (an OPEN obligation from OSError: Read-only file system) dropped before
+rendering. The execution/uncertainty/obligation/verification behavior was
+correct throughout and is UNCHANGED — this is an observability fix only.
+
+**Decisions recorded**:
+
+- **The canonical executor payload is the only disposition authority**: the
+  execute_action debug event now carries `ok_req.value["status"]` verbatim
+  (OBSERVED / FAILED / UNKNOWN_OUTCOME) instead of a hardcoded "ok". No
+  second execution-status representation exists anywhere; the "Ok" wrapper on
+  the executor return means only "the contracted pipeline ran to a terminal
+  disposition", never "the effect happened".
+- **Failure detail is threaded, not reconstructed**: `_drive_step` carries the
+  disposition's operational truth upward — the capability's `reason` (FAILED)
+  or, for UNKNOWN_OUTCOME, the OPEN obligation id + its canonical
+  `unknown_reason` (read from the obligations row, not from the exception
+  object). `run_live_slice`'s failure return gains a `detail` field ("step …
+  ended in UNKNOWN_OUTCOME not COMPLETED — <reason> (obligation obl_… is OPEN
+  for resolution)"); the terminal renders `ERROR <code>: <detail>` through
+  `redact_secrets`. The VERIFICATION_NOT_PASS and drive-rejection details that
+  previously existed only inside Rejected objects now survive to rendering
+  too.
+- **Semantics frozen**: UNKNOWN_OUTCOME is never coerced to FAILED; no
+  Observation, verification, Step/Task completion, auto-retry, or obligation
+  resolution is added for non-OBSERVED dispositions. The debug event carries
+  reason/obligation fields but the disposition check that gates
+  evidence/verification is byte-for-byte the same comparison.
+- **Existing assertions extended, not weakened**: two tests asserted the
+  misleading behavior itself (the hardcoded "ok" status; the detail-less
+  ERROR line). They were updated to assert the truthful forms plus the
+  additional detail — the guarded invariants (code preserved, no fake
+  success, ordering) are all still asserted.
+
+**Tests**: `tests/test_execution_observability.py` (5) — OBSERVED debug
+truthfulness + unchanged success rendering; deterministic UNKNOWN_OUTCOME
+(read-only dir) with full canonical-state assertions (Action UNKNOWN_OUTCOME,
+OPEN obligation, zero Observations, verification stays PENDING, Step PENDING,
+Task not COMPLETED) + no `execute_action ok` anywhere + terminal ERROR line
+with disposition/reason/obligation; run_live_slice result carries
+reason+detail; FAILED distinguishable from UNKNOWN_OUTCOME (no obligation
+for FAILED); success/failure rendering prefixes stay distinct. Suite: 264
+-> 269 passed.
+
+**Smoke (deterministic, exact forensic scenario)**: the helloworld.txt case
+now renders `[debug] … execute_action UNKNOWN_OUTCOME capability raised
+OSError: [Errno 30] Read-only file system: '/helloworld.txt'` and
+`ERROR STEP_NOT_COMPLETED: step … ended in UNKNOWN_OUTCOME not COMPLETED —
+capability raised OSError: … (obligation obl_… is OPEN for resolution)`; the
+writable control renders `execute_action OBSERVED` → verification →
+`OK: Task COMPLETED`. Canonical state identical to the forensic baseline in
+both cases.

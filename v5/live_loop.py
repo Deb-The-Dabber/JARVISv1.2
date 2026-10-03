@@ -496,15 +496,42 @@ def _drive_step(store, plan, task, step, action, bindings, ev, turn,
            {"op": "execute_action", "step_id": step.id, "action_id": action.id,
             "status": "rejected", "reason": rej.reason, "detail": rej.detail})
         return Rejected(rej.reason, rej.detail, rej.current)
-    ev(turn, "execute", "host_step", {
+    # Observability (execution-outcome v1): the debug event carries the
+    # CANONICAL execution disposition from the executor's payload — OBSERVED,
+    # FAILED, or UNKNOWN_OUTCOME — never a hardcoded "ok". The disposition is
+    # the source of truth; whether the Python call returned Ok says only that
+    # the contracted pipeline ran to a terminal disposition.
+    disposition = ok_req.value["status"]
+    event_detail = {
         "op": "execute_action", "step_id": step.id, "action_id": action.id,
-        "status": "ok",
-        "result": _result_payload(ok_req)})
-    if ok_req.value["status"] != "OBSERVED":
+        "status": disposition,
+        "result": _result_payload(ok_req)}
+    drive_payload = None
+    if disposition != "OBSERVED":
         # FAILED / UNKNOWN_OUTCOME etc. — drive the Work-side lifecycle fairly,
         # then the caller decides retry semantics. The Action is terminal;
-        # verification is meaningless here.
-        return Ok({"terminal_status": ok_req.value["status"], "action": action, "observation_id": None})
+        # verification is meaningless here. The disposition detail (reason, or
+        # for UNKNOWN_OUTCOME the OPEN obligation + its unknown_reason from
+        # canonical state) is carried up so the terminal can render the
+        # operational truth instead of a bare code.
+        drive_payload = {"terminal_status": disposition, "action": action,
+                        "observation_id": None}
+        if ok_req.value.get("reason"):
+            drive_payload["failure_reason"] = ok_req.value["reason"]
+            event_detail["reason"] = ok_req.value["reason"]
+        if disposition == "UNKNOWN_OUTCOME" and ok_req.value.get("obligation_id"):
+            obl_id = ok_req.value["obligation_id"]
+            drive_payload["obligation_id"] = obl_id
+            event_detail["obligation_id"] = obl_id
+            obl_row = store.read().execute(
+                "SELECT unknown_reason FROM obligations WHERE id = ?", (obl_id,)
+            ).fetchone()
+            if obl_row is not None:
+                drive_payload["unknown_reason"] = obl_row["unknown_reason"]
+                event_detail["reason"] = obl_row["unknown_reason"]
+    ev(turn, "execute", "host_step", event_detail)
+    if drive_payload is not None:
+        return Ok(drive_payload)
 
     obs_id = ok_req.value["observation_id"]
     evi = evidence.record_runtime_evidence(
@@ -779,9 +806,22 @@ def run_live_slice(store: Store, session_id: str, instruction: str,
                     drive_failure = drive
                     break
                 if drive.value["terminal_status"] != "COMPLETED":
-                    drive_failure = Rejected("STEP_NOT_COMPLETED",
-                                             f"step {cur.id} ended in "
-                                             f"{drive.value['terminal_status']} not COMPLETED", None)
+                    # Observability (execution-outcome v1): preserve the
+                    # meaningful detail — which disposition the step ended in,
+                    # the capability's reason (FAILED) or the OPEN obligation
+                    # + unknown_reason (UNKNOWN_OUTCOME, from canonical state).
+                    tstat = drive.value["terminal_status"]
+                    detail = f"step {cur.id} ended in {tstat} not COMPLETED"
+                    if tstat == "UNKNOWN_OUTCOME":
+                        if drive.value.get("unknown_reason"):
+                            detail += f" — {drive.value['unknown_reason']}"
+                        if drive.value.get("obligation_id"):
+                            detail += (f" (obligation "
+                                      f"{drive.value['obligation_id']} is OPEN "
+                                      "for resolution)")
+                    elif drive.value.get("failure_reason"):
+                        detail += f" — {drive.value['failure_reason']}"
+                    drive_failure = Rejected("STEP_NOT_COMPLETED", detail, None)
                     break
                 state["step_idx"] += 1
                 if state["step_idx"] >= len(state["ordered_steps"]):
@@ -795,7 +835,14 @@ def run_live_slice(store: Store, session_id: str, instruction: str,
 
     if not done or drive_failure is not None:
         reason = (drive_failure.reason if drive_failure else None) or halted_reason or "ran out of turns"
-        return {"ok": False, "reason": reason, "events": [asdict(e) for e in events]}
+        # Observability (execution-outcome v1): the failure detail the loop
+        # already knows survives to the caller (e.g. "step … ended in
+        # UNKNOWN_OUTCOME not COMPLETED — capability raised OSError: …
+        # (obligation obl_… is OPEN for resolution)"). Never a raw provider
+        # payload — only the canonical disposition + the registered reason.
+        detail = (drive_failure.detail if drive_failure else None) or ""
+        return {"ok": False, "reason": reason, "detail": detail,
+                "events": [asdict(e) for e in events]}
 
     # task completion — only reachable after ALL steps are verified+COMPLETED
     t = work.load_task(store.read(), state["task"].id)

@@ -429,7 +429,11 @@ class TestErrorRendering:
                                {"path": str(ghost)}, "verify_file_delete")
         term, out = make_terminal(store, session, p, ["delete it", "y", "/quit"])
         assert term.run() == 0
-        assert "ERROR STEP_NOT_COMPLETED\n" in out
+        # execution-outcome observability v1: the code is preserved AND the
+        # canonical FAILED disposition + capability reason now render too
+        assert any(o.startswith("ERROR STEP_NOT_COMPLETED:") for o in out), out
+        assert any("ended in FAILED not COMPLETED" in o and "file does not exist" in o
+                   for o in out), out
         assert "OK: Task" not in "".join(out)
         assert not ghost.exists()
 
@@ -446,7 +450,9 @@ class TestErrorRendering:
             assert term.run() == 0
         finally:
             caps._REGISTRY["file_delete"].execute = real
-        assert "ERROR VERIFICATION_NOT_PASS\n" in out
+        # observability v1: code preserved + the verification identity/outcome
+        assert any(o.startswith("ERROR VERIFICATION_NOT_PASS: verification ")
+                   and "-> FAIL" in o for o in out), out
         assert target.exists() and target.read_text() == "still here"
 
     def test_unexpected_exception_sanitized_and_continues(self, store, session, monkeypatch):

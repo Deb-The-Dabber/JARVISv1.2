@@ -453,7 +453,7 @@ class TestLiveLoopConfirmationIntegration:
         executed_at = max(i for i, e in enumerate(r["events"])
                           if e["kind"] == "host_step"
                           and e["detail"].get("op") == "execute_action"
-                          and e["detail"].get("status") == "ok")
+                          and e["detail"].get("status") == "OBSERVED")
         assert blocked_at < granted_at < executed_at
         # blocked reason is the real gate's reason
         blocked = [e for e in r["events"] if e["detail"].get("op") == "execution_blocked"][0]
