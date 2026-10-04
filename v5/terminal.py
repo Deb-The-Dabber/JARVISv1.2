@@ -78,21 +78,38 @@ else (deny). Requests run through the live Cognition loop; capabilities
 requiring confirmation will pause and ask.
 """
 
-# Generic plan guidance for arbitrary terminal requests: names ONLY the
-# registered capabilities/verifiers (tests assert registry consistency).
-TERMINAL_GUIDANCE = (
-    "propose_plan carries one StepProposal per step the instruction needs; "
-    "use only the registered capabilities: file_write (arguments "
-    "{\"path\", \"content\"}), file_read (arguments {\"path\"}), file_delete "
-    "(arguments {\"path\"}); each step's verification_requirements name the "
-    "matching method (verify_file_write, verify_file_read, verify_file_delete) "
-    "with applies_to_capability equal to the step's execution_capability; "
-    "later steps depend on earlier ones via depends_on_index; use paths "
-    "exactly as the user states them — relative paths and bare filenames "
-    "are safe because the host resolves them inside its writable JARVIS "
-    "workspace; do not invent absolute paths; never use paths inside the "
-    "JARVIS repository tree"
-)
+# Generic plan guidance for arbitrary terminal requests: REGISTRY-DRIVEN
+# (Investigation Capability v1) — the capability list and the verifier list
+# are composed from the live registries so the guidance can never drift from
+# what is actually registered. Static rule tail covers dependency order, path
+# policy for user-file operations, and the codebase_query source-tree scope.
+def _build_terminal_guidance() -> str:
+    from v5 import capabilities as _caps
+    from v5.verification import registered_methods
+    caps_list = ", ".join(
+        f"{name} {spec.arguments_hint}".strip()
+        for name, spec in sorted(_caps._REGISTRY.items()))
+    methods = ", ".join(sorted(set(registered_methods())))
+    return (
+        "propose_plan carries one StepProposal per step the instruction needs; "
+        f"use only the registered capabilities: {caps_list}; each step's "
+        "verification_requirements name the matching method "
+        f"({methods}) with applies_to_capability equal to the step's "
+        "execution_capability; when the request is an investigation of the JARVIS "
+        "implementation (find out / investigate / inspect / analyze), plan "
+        "codebase_query steps — search first, then read_file for the files "
+        "it surfaces; never invent file-creation steps for an investigation; "
+        "later steps depend on earlier ones via "
+        "depends_on_index; for user-file operations use paths exactly as the "
+        "user states them — relative paths and bare filenames are safe "
+        "because the host resolves them inside its writable JARVIS workspace; "
+        "do not invent absolute paths; for file operations never use paths "
+        "inside the JARVIS repository tree (codebase_query reads the JARVIS "
+        "source tree by design — that is its purpose)"
+    )
+
+
+TERMINAL_GUIDANCE = _build_terminal_guidance()
 
 COMMANDS = ("/help", "/debug", "/quit")
 

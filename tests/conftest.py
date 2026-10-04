@@ -13,8 +13,16 @@ def _jarvis_workspace(tmp_path, monkeypatch):
     test's tmp_path. Two effects: (a) every existing absolute tmp_path
     target is 'inside the workspace' and therefore preserved unchanged by
     the host policy; (b) relative-path resolution lands in tmp_path. No
-    test ever touches the real ~/.jarvis_v5/workspace."""
+    test ever touches the real ~/.jarvis_v5/workspace.
+
+    Investigation Capability v1: the source root is ALSO isolated — every
+    test gets a fresh empty synthetic source tree under tmp_path/src, so no
+    test depends on live repository content (tests that want the real
+    repo override this env var explicitly)."""
     monkeypatch.setenv("JARVIS_V5_WORKSPACE", str(tmp_path))
+    src_tree = tmp_path / "src"
+    src_tree.mkdir(exist_ok=True)
+    monkeypatch.setenv("JARVIS_V5_SOURCE_ROOT", str(src_tree))
 
 
 @pytest.fixture

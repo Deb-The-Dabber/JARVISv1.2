@@ -1040,3 +1040,81 @@ present/absent); end-to-end helloworld flow through the real terminal with
 confirmation target rendering + exact-byte verification + verifier PASS;
 denial still prevents execution; model-invented absolute path → native
 rejection, no OS error. Suite: 302 -> 346 passed.
+
+## 36. Investigation Capability v1 — codebase_query (2026-10-02)
+
+**Scope**: makes investigation directives ("Find out what the implementation
+does when an action ends in UNKNOWN_OUTCOME") genuine Work instead of
+conversational dead ends, per the approved investigation report. Bounded
+LOCAL codebase investigation only — web research stays deferred and
+honestly declined.
+
+**Decisions recorded**:
+
+- **`codebase_query` capability** (registered like every capability, host
+  layer, no frozen-contract change): two operations — `read_file` (bounded
+  64 KiB UTF-8 source read) and `search` (bounded regex scan: ≤200 files,
+  ≤50 matches, 200-char lines, ≤1 MiB files, `.git` excluded, default glob
+  `*.py`). Pure read: IDEMPOTENT, `requires_confirmation=False`. Zero-match
+  searches are OBSERVED truth, not failures — "no matches" is a real answer.
+  NOT a shell: exactly two operations, no command execution.
+- **Source-root boundary** (`v5/paths.py::resolve_source_path`): the same
+  containment discipline as the workspace, rooted at the repository
+  (`JARVIS_V5_SOURCE_ROOT` override; tests get isolated synthetic trees).
+  Absolute-inside preserved; absolute-outside, `..` escapes, symlink
+  escapes, NUL/empty/oversize/root-target all natively rejected. The walk
+  uses `followlinks=False` plus per-file realpath containment, so a source
+  symlink to outside can neither be read nor smuggle search matches.
+- **Independent verification** (`verify_codebase_query`): the verifier
+  loads the Action's canonical args, RECOMPUTES the ground truth itself
+  with the same bounded measurement primitives the capability used
+  (`_source_read`/`_source_search` — one shared instrument, like the
+  filesystem is for file_read), and compares against the Observation's
+  claim. Fabricated content, invented match lines, hidden matches, and
+  unreproducible claims all FAIL; honest claims (including zero-match
+  truths) PASS. Adversarial tests pin each lie shape.
+- **Registry-driven Intent Boundary**: `_classify_instruction()` and the
+  terminal guidance are now COMPOSED from the live capability/verification
+  registries (`CapabilitySpec.summary` / `.arguments_hint` are the single
+  source of truth) — prompts can no longer drift from what is registered;
+  a lockstep test registers a fake capability and asserts it appears. The
+  semantic policy: a directive to investigate/inspect/find out/analyze the
+  JARVIS codebase is WORK (codebase_query can perform it); explanations,
+  hypotheticals, capability-questions, and out-of-registry directives
+  (web research, external-system benchmarks) stay CONVERSATION — never
+  re-routed to an unrelated registered operation. No verb-keyword rules.
+- **Honest decline fix**: reply rule (4) no longer invites "submit it as a
+  task" for work whose capability doesn't exist — it states plainly that
+  JARVIS doesn't have that capability yet and does not imply it could be
+  executed.
+- **Guidance nudge (prompt-level, NOT a boundary)**: investigation requests
+  plan codebase_query steps; never invent file-creation steps for an
+  investigation. Real-provider validation showed why: without the nudge one
+  model run planned a fictional `file_write("src/lib.rs")` for an
+  architecture investigation — the machinery handled it honestly (FAILED,
+  no fake completion), but the nudge avoids the waste.
+
+**Real-provider validation** (13-input corpus): codebase investigation
+directives → work with genuine search Actions against the real repo,
+independent verification PASS, Task COMPLETED (verified in the DB for
+three cases; the architecture-bottleneck case initially produced a poor
+model plan that FAILED honestly, then completed after the guidance nudge);
+external-evidence directives (121M-model comparison, Needle research) →
+conversation with honest capability-unavailable declines; all
+conversation controls (factual questions, explanations, hypotheticals,
+capability questions, "do it") stayed conversation with zero canonical
+rows. One borderline: "Compare two approaches for local tool calling…"
+(naming no approaches) drew a clarifying question — defensible for an
+underspecified comparison; the deterministic suite pins its routing
+plumbing as WORK when the classifier says work.
+
+**Tests**: `tests/test_investigation_capability.py` (45) — registration,
+schema matrix, source-root boundary (incl. symlink in/escape), bounded
+execution (caps, truncation, glob, binary skip, zero-match truth),
+verification independence (6 lie shapes + honest passes), registry-driven
+prompts (dynamic lockstep), the five investigation examples + external
+research + conversation controls routing, honest-decline prompt content,
+and the full canonical-lifecycle e2e against the REAL source tree
+(goal→task→plan→2 steps→2 OBSERVED actions→real matches→2 PASS
+verifications→COMPLETED) plus the sabotaged-observation adversarial
+(lying capability → verification FAIL → no completion). Suite: 346 -> 391.

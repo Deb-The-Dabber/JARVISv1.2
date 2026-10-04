@@ -99,3 +99,63 @@ def resolve_workspace_path(raw) -> tuple[pathlib.Path | None, str | None]:
         return resolved, None
     except OSError as e:
         return None, f"path could not be resolved: {e}"
+
+
+# ── Investigation Capability v1: the JARVIS source-root boundary ─────────────
+# A second host-owned root, deliberately separate from the user-file
+# workspace: codebase_query reads/searches the JARVIS V5 source tree so
+# investigation directives ("find out what the implementation does when
+# an action ends in UNKNOWN_OUTCOME") become genuine Work. The same
+# containment discipline as the workspace applies: lexical normalization,
+# realpath (symlink escape caught), absolute-inside preserved,
+# absolute-outside rejected, traversal rejected, root itself rejected.
+
+SOURCE_ROOT_ENV = "JARVIS_V5_SOURCE_ROOT"
+
+
+def source_root(create: bool = False) -> pathlib.Path:
+    """The JARVIS V5 source tree root, fully resolved. Default: the repository
+    this module lives in (v5/paths.py -> repo root). `JARVIS_V5_SOURCE_ROOT`
+    overrides it (tests point it at an isolated synthetic tree so no test
+    ever reads or depends on live repository content)."""
+    raw = os.environ.get(SOURCE_ROOT_ENV)
+    if raw:
+        root = pathlib.Path(raw).expanduser().resolve()
+    else:
+        root = pathlib.Path(__file__).resolve().parent.parent.resolve()
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def resolve_source_path(raw) -> tuple[pathlib.Path | None, str | None]:
+    """Resolve a source-tree path under the same host policy as
+    resolve_workspace_path, bounded to the source root instead. Used by the
+    codebase_query capability's read_file operation and, independently, by
+    its registered verifier."""
+    if not isinstance(raw, str):
+        return None, "path must be a non-empty string"
+    if not raw or not raw.strip():
+        return None, "path must be a non-empty string"
+    if "\x00" in raw:
+        return None, "path contains NUL bytes"
+    if len(raw) > 4096:
+        return None, "path exceeds 4096 chars"
+    try:
+        p = pathlib.Path(raw).expanduser()
+        root = source_root()
+        candidate = p if p.is_absolute() else root / p
+        normalized = os.path.normpath(str(candidate))
+        resolved = pathlib.Path(os.path.realpath(normalized))
+        if resolved == root:
+            return None, "cannot target the JARVIS source root itself"
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            if p.is_absolute():
+                return None, ("absolute paths outside the JARVIS source tree are "
+                              "not allowed — use a repository-relative path")
+            return None, "path escapes the JARVIS source tree (.. traversal)"
+        return resolved, None
+    except OSError as e:
+        return None, f"path could not be resolved: {e}"

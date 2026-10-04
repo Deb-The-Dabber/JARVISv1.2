@@ -234,6 +234,98 @@ register_method(VerificationMethodSpec(
 ))
 
 
+# ── verify_codebase_query: independent re-computation (Investigation v1) ────
+# The verifier NEVER trusts the capability's return value or the Observation
+# text. It loads the Action's CANONICAL arguments, recomputes the ground truth
+# itself using the same shared measurement instrument the capability used
+# (_source_read / _source_search — the bounded, deterministic primitives), and
+# compares that ground truth against the Observation's CLAIMED result. A
+# fabricated or misleading capability result (wrong content, invented match
+# lines, hidden matches) cannot PASS: the recomputation disagrees.
+
+def _make_verify_codebase_query_evaluator(store: Store, action_id: str):
+    """PASS  = the independently recomputed result equals the Observation's
+              claimed result (the capability reported the codebase truth),
+    FAIL  = the claim disagrees with the recomputed ground truth, or the
+            claim cannot be reproduced at all,
+    None  = INCONCLUSIVE (args missing/malformed, or an OSError during the
+            recomputation)."""
+    import json as _json
+    from v5.capabilities import DefiniteNoEffect, _source_read, _source_search
+
+    row = store.read().execute(
+        "SELECT arguments FROM actions WHERE id = ?", (action_id,)
+    ).fetchone()
+    expected_args = _json.loads(row["arguments"]) if row is not None else None
+
+    obs_row = store.read().execute(
+        "SELECT raw_result FROM observations WHERE action_id = ?", (action_id,)
+    ).fetchone()
+    claimed = _json.loads(obs_row["raw_result"]) if obs_row is not None else None
+
+    def _claim_fields(claim):
+        if not isinstance(claim, dict):
+            return None
+        if claim.get("operation") == "read_file":
+            return ("read_file",
+                    (claim.get("rel_path"), claim.get("content"),
+                     bool(claim.get("truncated"))))
+        if claim.get("operation") == "search":
+            matches = claim.get("matches")
+            if not isinstance(matches, list):
+                return None
+            norm = [tuple(sorted(m.items())) if isinstance(m, dict) else None
+                    for m in matches]
+            return ("search", matches, claim.get("files_scanned"),
+                    bool(claim.get("truncated")))
+        return None
+
+    def evaluate(claim_row, evidence_rows) -> bool | None:
+        if expected_args is None or claimed is None:
+            return None
+        op = expected_args.get("operation")
+        try:
+            if op == "read_file":
+                p, err = _paths.resolve_source_path(expected_args.get("path"))
+                if err is not None:
+                    return None
+                ground = _source_read(p)
+                claim = _claim_fields(claimed)
+                if claim is None or claim[0] != "read_file":
+                    return False
+                return (claim[1] == (ground["rel_path"], ground["content"],
+                                     ground["truncated"]))
+            pattern = expected_args.get("pattern")
+            if not isinstance(pattern, str):
+                return None
+            ground = _source_search(pattern, expected_args.get("file_glob", "*.py"))
+            claim = _claim_fields(claimed)
+            if claim is None or claim[0] != "search":
+                return False
+            g_matches = [{"file": m["file"], "line_no": m["line_no"],
+                          "line": m["line"]} for m in ground["matches"]]
+            c_matches = [{k: m.get(k) for k in ("file", "line_no", "line")}
+                         if isinstance(m, dict) else None for m in claim[1]]
+            return (c_matches == g_matches
+                    and claim[2] == ground["files_scanned"]
+                    and claim[3] == ground["truncated"])
+        except DefiniteNoEffect:
+            # ground truth could not be recomputed (file vanished etc.) —
+            # the claim is not reproducible, so it cannot PASS
+            return False
+        except OSError:
+            return None  # genuinely inconclusive
+
+    return evaluate
+
+
+register_method(VerificationMethodSpec(
+    name="verify_codebase_query",
+    applies_to_capability="codebase_query",
+    make_evaluator=_make_verify_codebase_query_evaluator,
+))
+
+
 def run_method_for_action(store: Store, verification_id: str, action_id: str):
     """Resolve a requirement-bound Verification's registered method and run it
     through the established run_verification path against a specific executed
