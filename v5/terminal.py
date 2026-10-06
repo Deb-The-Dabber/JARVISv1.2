@@ -44,6 +44,7 @@ import sys
 from typing import Callable
 
 from v5 import conversation, live_loop, paths, safety
+from v5.live_loop import redact_secrets
 from v5.models import Ok, Rejected, Result
 from v5.store import Store
 
@@ -97,8 +98,15 @@ def _build_terminal_guidance() -> str:
         f"({methods}) with applies_to_capability equal to the step's "
         "execution_capability; when the request is an investigation of the JARVIS "
         "implementation (find out / investigate / inspect / analyze), plan "
-        "codebase_query steps — search first, then read_file for the files "
-        "it surfaces; never invent file-creation steps for an investigation; "
+        "MULTIPLE dependent codebase_query steps — search for the relevant "
+        "symbols first, then more searches or read_file operations on the "
+        "source files it surfaces, as many as the question needs; to read a "
+        "source file use codebase_query with operation \"read_file\" (the "
+        "file_read capability is a DIFFERENT thing: it only sees user files "
+        "in the JARVIS workspace, not the source tree); after each step "
+        "completes you receive its VERIFIED OBSERVATION evidence, so choose "
+        "the next step's arguments from that evidence; never invent "
+        "file-creation steps for an investigation; "
         "later steps depend on earlier ones via "
         "depends_on_index; for user-file operations use paths exactly as the "
         "user states them — relative paths and bare filenames are safe "
@@ -117,20 +125,6 @@ COMMANDS = ("/help", "/debug", "/quit")
 # rendering; they are ordinary structured Rejected reasons, not new state).
 CONFIRM_DECLINED = "CONFIRMATION_DECLINED"
 CONFIRM_EOF = "CONFIRMATION_EOF"
-
-
-def redact_secrets(text: str) -> str:
-    """Replace credential-ish environment values that appear in text with
-    *** (never render a key/token/secret, including in error paths)."""
-    try:
-        for name, value in os.environ.items():
-            if not value or len(value) < 8:
-                continue
-            if re.search(r"KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL", name or "", re.I):
-                text = text.replace(value, "***")
-    except Exception:
-        pass
-    return text
 
 
 def _stdin_line() -> str:
@@ -194,6 +188,23 @@ class InteractiveTerminal:
         if result.get("ok"):
             task = (result.get("final") or {}).get("task_status", "COMPLETED")
             self._emit(f"OK: Task {task}\n")
+            # Investigation Synthesis v1: render findings when present (never
+            # for ordinary file ops — those results carry no findings). When
+            # synthesis failed, report that honestly without touching the
+            # truthful COMPLETED status above.
+            findings = result.get("findings")
+            if isinstance(findings, dict) and findings.get("text"):
+                # Remediation D2: the label must never imply the synthesized
+                # PROSE is verified — only the observations are. Findings are
+                # unverified model interpretation (DECISIONS #38).
+                guard = ", claim-guarded" if findings.get("guarded") else ""
+                self._emit(f"FINDINGS (unverified synthesis of verified "
+                           f"observations{guard}):\n"
+                           f"{redact_secrets(findings['text'])}\n")
+            elif result.get("findings_error"):
+                self._emit(f"FINDINGS: synthesis unavailable "
+                           f"({result['findings_error']}) — the completed Work "
+                           "and its verified observations are unaffected.\n")
             return
         reason = result.get("reason") or "UNKNOWN"
         if reason == CONFIRM_DECLINED:
